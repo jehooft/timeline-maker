@@ -1,6 +1,8 @@
-# Timeline Maker — standalone
+# Timeline Maker
 
-This is the same app, set up to run as an ordinary website — no Claude needed.
+An app that allows you to create your own timelines without the need to
+pay a stupid amount of money to sites that don't even let you do the things
+you want to do with them, which has been my experience.
 
 ## Try it locally
 
@@ -11,24 +13,24 @@ npm install
 npm run dev
 ```
 
-Then open the address it prints (usually http://localhost:5173). That's it —
-the whole app, running in your own browser, saving to your own browser's storage.
+Then open the address it prints (usually http://localhost:5173). That's it! 
+The whole app, running in your own browser, saving to your own browser's storage.
 
 ## Share it with someone else
 
 The easiest way is to give them a link rather than a folder of files. Any of
 these work and have a free tier:
 
-- **[Vercel](https://vercel.com)** — drag the `timeline-maker` folder onto
+- **[Vercel](https://vercel.com)**: drag the `timeline-maker` folder onto
   their web dashboard, or `npx vercel` from inside it.
-- **[Netlify](https://netlify.com)** — same idea; drag-and-drop deploy is on
+- **[Netlify](https://netlify.com)**: same idea; drag-and-drop deploy is on
   their site.
-- **[GitHub Pages](https://pages.github.com)** — a workflow is already set up
+- **[GitHub Pages](https://pages.github.com)**: a workflow is already set up
   in `.github/workflows/deploy.yml`: push to `main`, then enable Pages once
   under Settings → Pages → Source → "GitHub Actions". Every push after that
   rebuilds and republishes automatically.
 
-All three build the app to a handful of static files (HTML, CSS, JS) — there is
+All three build the app to a handful of static files (HTML, CSS, JS); there is
 no server-side code and no database, so hosting is free and simple.
 
 ## Building it yourself
@@ -40,7 +42,7 @@ npm run preview    # serves that build locally, to check it before sharing
 
 ## What each person's copy remembers
 
-Storage is per browser, per device — it uses the browser's own local storage,
+Storage is per browser, per device, so it uses the browser's own local storage,
 the same mechanism every website uses to remember you. That means:
 
 - Your friend's timelines live only in *their* browser. You won't see each
@@ -48,7 +50,7 @@ the same mechanism every website uses to remember you. That means:
 - Clearing browser data, using a different browser, or a different device
   starts fresh.
 - **Export is the real backup.** Use the Timelines → Export JSON button
-  regularly if a timeline matters — it downloads a single file that can be
+  regularly if a timeline matters. It downloads a single file that can be
   imported back in, on any device, any time.
 
 ## Project layout
@@ -56,7 +58,7 @@ the same mechanism every website uses to remember you. That means:
 ```
 src/
   time.js, ticks.js, model.js       the timeline logic (no browser APIs)
-  storage.js                        saving and loading — uses localStorage
+  storage.js                        saving and loading. Uses localStorage
   csv.js                            import/export as CSV
   App.jsx, index.jsx                the app itself
   ui/                               panels, editor, search, etc.
