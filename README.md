@@ -23,8 +23,10 @@ these work and have a free tier:
   their web dashboard, or `npx vercel` from inside it.
 - **[Netlify](https://netlify.com)** — same idea; drag-and-drop deploy is on
   their site.
-- **[GitHub Pages](https://pages.github.com)** — push this folder to a GitHub
-  repo, run `npm run build`, and serve the `dist/` folder.
+- **[GitHub Pages](https://pages.github.com)** — a workflow is already set up
+  in `.github/workflows/deploy.yml`: push to `main`, then enable Pages once
+  under Settings → Pages → Source → "GitHub Actions". Every push after that
+  rebuilds and republishes automatically.
 
 All three build the app to a handful of static files (HTML, CSS, JS) — there is
 no server-side code and no database, so hosting is free and simple.
