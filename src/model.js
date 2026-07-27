@@ -128,6 +128,34 @@ export function siblingClash(eras, candidate) {
   return null;
 }
 
+/* Siblings the candidate completely swallows.
+
+   An overlap is only ever reported by `siblingClash`, which offers no way out
+   except nesting the *new* era under an existing one. That is backwards when
+   the era being added is the broader of the two — adding "Phanerozoic" once
+   "Mesozoic" already sits at the top level had no resolution at all. So:
+   overlap purely by containment is resolvable in the other direction, by
+   adopting the eras it covers as children.
+
+   Returns the covered siblings, or null when any overlap is partial — a
+   candidate that runs through the middle of a sibling is a genuine conflict
+   that nesting cannot express, and must still be refused. */
+export function containedSiblings(eras, candidate) {
+  const a0 = eraStart(candidate), a1 = eraEnd(candidate);
+  const parent = candidate.parent || null;
+  const out = [];
+  for (const r of eras) {
+    if (r.id === candidate.id) continue;
+    if (r.cat !== candidate.cat) continue;
+    if ((r.parent || null) !== parent) continue;
+    if (a0 < eraEnd(r) && eraStart(r) < a1) {
+      if (a0 <= eraStart(r) && eraEnd(r) <= a1) out.push(r);
+      else return null;                     // partial overlap: not resolvable
+    }
+  }
+  return out.length ? out : null;
+}
+
 /* A soft check: a sub-era normally sits inside the era that contains it. */
 export function escapesParent(eras, candidate) {
   if (!candidate.parent) return null;

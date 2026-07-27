@@ -44,7 +44,8 @@ export async function probeStorage() {
 
 async function getJSON(key) {
   const raw = backend.get(key);
-  return raw ? JSON.parse(raw) : null;
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (err) { return null; }   // missing or unreadable: treat as absent
 }
 async function setJSON(key, value) {
   try {
@@ -106,7 +107,11 @@ export async function loadIndex() {
 export async function saveDoc(doc) {
   const existing = new Set(await keysWith("img:"));
   for (const [id, rec] of Object.entries(doc.images || {})) {
-    if (!existing.has("img:" + id)) await setJSON("img:" + id, rec);
+    if (existing.has("img:" + id)) continue;
+    try {
+      await setJSON("img:" + id, rec);
+      existing.add("img:" + id);
+    } catch (err) { /* a picture that will not fit must not stop the timeline itself saving */ }
   }
   await setJSON("tl:doc:" + doc.id, encodeDoc(doc));
   const idx = await loadIndex();

@@ -179,8 +179,12 @@ export const STYLES = `
                    border-radius: 3px; padding: 10px 12px; cursor: pointer; width: 100%;
                    text-align: center; font: 11px ui-monospace, monospace; color: var(--muted);
                    letter-spacing: .06em; }
-        .filebtn:hover { border-color: var(--accent); color: var(--text); }
+        .filebtn:hover, .filebtn.over { border-color: var(--accent); color: var(--text); }
+        .filebtn.over { border-style: solid; }
         .filebtn input { display: none; }
+        .linkbtn { margin-top: 6px; width: 100%; }
+        .urlrow { display: flex; gap: 6px; margin-top: 6px; }
+        .urlrow input { flex: 1; min-width: 0; }
         .imgbox { display: flex; gap: 10px; align-items: flex-start; }
         .imgbox img { width: 76px; height: 60px; object-fit: cover; border-radius: 3px;
                       border: 1px solid var(--rule); flex: none; }
@@ -228,6 +232,26 @@ export const STYLES = `
                 color: var(--muted); border: 1px solid var(--faint); border-radius: 2px; padding: 2px 5px; }
         .card-actions { display: flex; gap: 6px; margin-top: 12px; }
         .card.preview { pointer-events: none; opacity: .97; }
+        .card-links { display: flex; flex-direction: column; gap: 3px; margin-bottom: 10px; }
+        .card-links a { font: 11px ui-monospace, monospace; color: var(--accent);
+                        text-decoration: none; overflow: hidden; text-overflow: ellipsis;
+                        white-space: nowrap; }
+        .card-links a:hover { text-decoration: underline; }
+
+        /* ---- context menu ---- */
+        .ctxmenu { position: absolute; z-index: 36; background: var(--ink-2);
+                   border: 1px solid var(--rule); border-radius: 4px; padding: 4px;
+                   box-shadow: 0 14px 36px rgba(0,0,0,.55); }
+        .ctx-head { margin: 2px 6px 5px; font: 9px ui-monospace, monospace; letter-spacing: .11em;
+                    text-transform: uppercase; color: var(--muted); overflow: hidden;
+                    text-overflow: ellipsis; white-space: nowrap; }
+        .ctxmenu button { display: block; width: 100%; background: none; border: 0;
+                          color: var(--text); font: 11px/1 ui-monospace, monospace;
+                          text-align: left; padding: 7px 8px; border-radius: 3px; cursor: pointer; }
+        .ctxmenu button:hover:not(:disabled) { background: var(--ink-3); }
+        .ctxmenu button:disabled { opacity: .35; cursor: default; }
+        .ctxmenu button.danger { color: var(--danger); }
+        .ctx-sep { display: block; height: 1px; background: var(--faint); margin: 4px 2px; }
 
         .sizesel { background: var(--ink-2); border: 1px solid var(--rule); color: var(--text);
                    font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em;

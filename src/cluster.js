@@ -40,10 +40,22 @@ function clusterGroup(points, gap, singles, clusters) {
       if (p.t0 < lo.t0) lo = p;
       if (p.t0 > hi.t0) hi = p;
     }
+    /* The tightest pair inside the run. Clicking a cluster zooms until its
+       members separate, and it is this smallest gap — not the cluster's whole
+       span — that decides when that happens. Zero means two members share an
+       instant and no amount of zoom will part them. */
+    const ts = run.map((p) => p.t0).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    let minGap = Infinity;
+    for (let i = 1; i < ts.length; i++) {
+      const d = Number(ts[i] - ts[i - 1]);
+      if (d > 0 && d < minGap) minGap = d;
+    }
+    if (!Number.isFinite(minGap)) minGap = 0;
+
     const x = (run[0].x1p + run[run.length - 1].x1p) / 2;
     clusters.push({
       key: "cl:" + run[0].key + ":" + run.length,
-      isCluster: true, important, members: run, count: run.length,
+      isCluster: true, important, members: run, count: run.length, minGap,
       cat: run[0].cat, x1p: x, x2p: x, t0: lo.t0, t1: hi.t0,
       x0: x - 13, x1: x + 13,
     });

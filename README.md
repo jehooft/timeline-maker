@@ -65,4 +65,13 @@ src/
 If you want to change something, `src/App.jsx` is the file that draws the
 timeline and handles clicks and dragging; `src/model.js` is the file that knows
 what an event or an era *is*. Nothing else needs a browser to run — you can
-test the logic with plain Node.js (see `test.mjs` in the full source package).
+test the logic with plain Node.js:
+
+```sh
+npm test
+```
+
+This runs `test.mjs` (calendar, date parsing, ticks, row packing, the era
+tree), `test-io.mjs` (JSON/CSV round-trips), `test-phase7.mjs` (undo/redo,
+search, clustering), and `test-storage.mjs` (saving, loading, and the picture
+lifecycle against this build's localStorage backend).

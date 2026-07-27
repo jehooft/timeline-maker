@@ -6,12 +6,15 @@ import { fmtInstant, fmtDur } from "../time.js";
 /* ------------------------------------------------------------- the detail card
    Doubles as the hover preview for pinned images: same card, but inert and
    without the controls, so it can appear and vanish without stealing clicks. */
-export function DetailCard({ item, doc, stage, anchor, preview, onClose, onEdit }) {
+export function DetailCard({ item, doc, stage, anchor, preview, rightInset = 0, onClose, onEdit }) {
   const cat = doc.categories.find((c) => c.id === item.cat);
   const color = item.color || (cat ? cat.color : "#888");
   const image = item.imageId ? doc.images[item.imageId] : null;
   const W = 330;
-  const left = Math.max(10, Math.min(stage.w - W - 10, anchor.x - W / 2));
+  /* The editor drawer docks over the right edge, so the card has to be clamped
+     against the space that is actually left rather than the whole stage. */
+  const room = Math.max(W + 20, stage.w - rightInset);
+  const left = Math.max(10, Math.min(room - W - 10, anchor.x - W / 2));
   const below = anchor.y + 300 < stage.h;
   const top = below ? anchor.y + 22 : Math.max(10, Math.min(anchor.y - 300, stage.h - 320));
   const isEra = item.kind === "era";
@@ -57,6 +60,18 @@ export function DetailCard({ item, doc, stage, anchor, preview, onClose, onEdit 
         <div className="card-within">
           <span>Falls within</span>
           {within.map((r) => <em key={r.id}>{r.title}</em>)}
+        </div>
+      )}
+      {item.links && item.links.length > 0 && (
+        <div className="card-links">
+          {item.links.map((u) => (
+            /* noopener/noreferrer: an outbound link must not hand the opened
+               page a handle back to this one. */
+            <a key={u} href={u} target="_blank" rel="noopener noreferrer"
+              title={u} tabIndex={preview ? -1 : 0}>
+              {u.replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "")}
+            </a>
+          ))}
         </div>
       )}
       {item.tags && item.tags.length > 0 && (

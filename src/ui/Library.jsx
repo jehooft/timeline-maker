@@ -2,8 +2,8 @@
    and out of the app (JSON for fidelity, CSV for spreadsheets). */
 import React, { useRef, useState } from "react";
 
-export function Library({ entries, currentId, busy, persistent, onOpen, onNew, onDuplicate,
-  onDelete, onExportJSON, onExportCSV, onImportFile, onClose }) {
+export function Library({ entries, currentId, busy, persistent, unexported, sizeNote,
+  onOpen, onNew, onDuplicate, onDelete, onExportJSON, onExportCSV, onImportFile, onClose }) {
   const [confirmId, setConfirmId] = useState(null);
   const fileRef = useRef(null);
 
@@ -19,6 +19,13 @@ export function Library({ entries, currentId, busy, persistent, onOpen, onNew, o
           <p className="notice warn" style={{ margin: "0 18px 12px" }}>
             No browser storage available here, so this session will be forgotten on reload.
             Export to a file to keep your work.
+          </p>
+        )}
+        {persistent && unexported > 0 && (
+          <p className="notice" style={{ margin: "0 18px 12px" }}>
+            <b>{unexported}</b> change{unexported === 1 ? "" : "s"} since the last export
+            {sizeNote ? ", and this timeline is about " + sizeNote : ""}.
+            Browser storage can be cleared without warning, so an exported file is the real backup.
           </p>
         )}
 

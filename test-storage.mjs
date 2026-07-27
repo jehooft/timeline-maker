@@ -1,0 +1,147 @@
+/* Exercises the persistence layer against a stand-in for localStorage — the
+   backend the standalone build actually uses (src/storage.js was rewritten
+   from the Claude-artifact window.storage API to localStorage; see that
+   file's header comment). localStorage is synchronous and string-only, and
+   its writes can throw (quota, private browsing), which is what most of the
+   awkward cases below are about.
+
+   This supersedes the old test-storage.mjs and test-hang.mjs from the
+   artifact-bundle source: the "hang forever" bug those covered doesn't exist
+   here — localStorage never fails to settle, it just throws or doesn't — so
+   there's nothing left in that shape to test. */
+
+class FakeLocalStorage {
+  constructor() { this.store = new Map(); this.full = new Set(); this.writes = 0; }
+  getItem(k) { return this.store.has(k) ? this.store.get(k) : null; }
+  setItem(k, v) {
+    if (this.full.has(k)) { const e = new Error("QuotaExceededError"); e.name = "QuotaExceededError"; throw e; }
+    this.writes++;
+    this.store.set(k, String(v));
+  }
+  removeItem(k) { this.store.delete(k); }
+  key(i) { return [...this.store.keys()][i] ?? null; }
+  get length() { return this.store.size; }
+}
+const has = (ls, suffix) => [...ls.store.keys()].some((k) => k.endsWith(suffix));
+const val = (ls, suffix) => { const k = [...ls.store.keys()].find((x) => x.endsWith(suffix)); return k ? ls.store.get(k) : undefined; };
+
+let pass = 0, fail = 0;
+const ok = (n, c, x = "") => { if (c) pass++; else { fail++; console.log("  FAIL " + n + (x ? "  " + x : "")); } };
+
+/* ---- main scenario: localStorage present ---- */
+const ls = new FakeLocalStorage();
+globalThis.window = { localStorage: ls };
+const S = await import("./src/storage.js");
+const { starterDoc } = await import("./src/model.js");
+
+ok("detects a real store", S.isPersistent() === true);
+ok("a working store passes the probe", (await S.probeStorage()) === true);
+
+const img = { id: "img_a", name: "a.webp", url: "data:image/webp;base64,AAAA", thumb: "data:,", w: 800, h: 600 };
+const doc = { ...starterDoc(), id: "tl_1", createdAt: "2026-01-01T00:00:00Z", images: { img_a: img } };
+doc.events[0] = { ...doc.events[0], imageId: "img_a", pinImage: true };
+
+/* ---- save ---- */
+const entry = await S.saveDoc(doc);
+ok("returns a library entry", entry.id === "tl_1" && entry.events === doc.events.length);
+ok("writes the document", has(ls, "tl:doc:tl_1"));
+ok("writes the index", has(ls, "tl:index"));
+ok("stores pictures under their own key", has(ls, "img:img_a"));
+ok("keeps pictures out of the document", !val(ls, "tl:doc:tl_1").includes("base64"));
+ok("everything stored is a string", [...ls.store.values()].every((v) => typeof v === "string"));
+
+/* editing text must not rewrite the image */
+const before = ls.writes;
+await S.saveDoc({ ...doc, name: "Renamed" });
+ok("re-saving does not rewrite stored pictures", ls.writes - before === 2, "writes: " + (ls.writes - before));
+
+/* ---- load ---- */
+const back = await S.loadDoc("tl_1");
+ok("loads the document", back && back.name === "Renamed");
+ok("restores BigInt instants", typeof back.events[0].start.t === "bigint");
+ok("instants are unchanged", back.events[0].start.t === doc.events[0].start.t);
+ok("reattaches the picture", back.images.img_a && back.images.img_a.url === img.url);
+ok("keeps the era tree", back.eras.length === doc.eras.length
+   && back.eras.find((r) => r.id === "r_mes").parent === "r_phan");
+ok("missing documents return null", (await S.loadDoc("nope")) === null);
+
+/* ---- index ---- */
+const idx = await S.loadIndex();
+ok("index has one entry", idx.length === 1 && idx[0].name === "Renamed", JSON.stringify(idx));
+
+/* ---- a second timeline, sharing nothing ---- */
+await S.saveDoc({ id: "tl_2", name: "Second", categories: [], eras: [], events: [], images: {} });
+ok("index grows", (await S.loadIndex()).length === 2);
+
+/* ---- delete, and orphaned pictures get swept up ---- */
+const after = await S.deleteDoc("tl_1");
+ok("removes the document", !has(ls, "tl:doc:tl_1"));
+ok("removes it from the index", after.length === 1 && after[0].id === "tl_2");
+ok("sweeps up the orphaned picture", !has(ls, "img:img_a"));
+
+/* a picture still in use must survive the sweep */
+await S.saveDoc({ ...doc, id: "tl_3" });
+await S.saveDoc({ ...doc, id: "tl_4" });
+await S.deleteDoc("tl_3");
+ok("keeps pictures another timeline still uses", has(ls, "img:img_a"));
+
+/* ---- preferences ---- */
+await S.saveAppState({ lastOpenedId: "tl_4", uiScale: 1.2 });
+const st = await S.loadAppState();
+ok("remembers preferences", st.lastOpenedId === "tl_4" && st.uiScale === 1.2);
+ok("absent preferences are an empty object", typeof (await S.loadAppState()) === "object");
+
+/* ---- corrupt data must not take the app down ---- */
+{
+  const idxKey = [...ls.store.keys()].find((k) => k.endsWith("tl:index"));
+  ls.store.set(idxKey, "{not json");
+  ok("survives a corrupt index", Array.isArray(await S.loadIndex()));
+  await S.saveDoc({ ...doc, id: "tl_4" }); // repair the index for what follows
+  const docKey = [...ls.store.keys()].find((k) => k.endsWith("tl:doc:tl_4"));
+  ls.store.set(docKey, "{not json");
+  ok("survives a corrupt document", (await S.loadDoc("tl_4")) === null);
+}
+
+/* ---- filenames ---- */
+ok("cleans up filenames", S.safeFileName("A short history of everything!") === "A-short-history-of-everything");
+ok("falls back on an empty name", S.safeFileName("") === "timeline");
+ok("falls back on a name of pure punctuation", S.safeFileName("///") === "timeline");
+
+/* ---- a picture too big to store must not sink the whole save ----
+   REGRESSION CHECK: the localStorage port dropped the try/catch around each
+   image write that the original had (see storage.js's saveDoc). Without it,
+   one oversized picture throws and the timeline itself never gets written. */
+{
+  const ls2 = new FakeLocalStorage();
+  globalThis.window = { localStorage: ls2 };
+  const S2 = await import("./src/storage.js?quota");
+  const { starterDoc: starterDoc2 } = await import("./src/model.js?quota");
+  const docQ = { ...starterDoc2(), id: "tl_q", createdAt: "2026-01-01T00:00:00Z",
+    images: { good: { id: "good", url: "data:,good" }, bad: { id: "bad", url: "data:,bad" } } };
+  docQ.events[0] = { ...docQ.events[0], imageId: "bad" };
+  docQ.events[1] = { ...docQ.events[1], imageId: "good" };
+  ls2.full.add("timeline-maker:img:bad");
+  const entryQ = await S2.saveDoc(docQ);
+  ok("a picture that will not fit does not stop the timeline saving", entryQ && entryQ.id === "tl_q");
+  ok("the timeline document was written despite one image failing", has(ls2, "tl:doc:tl_q"));
+  ok("the failing picture was not written", !has(ls2, "img:bad"));
+  ok("the good picture was written", has(ls2, "img:good"));
+}
+
+/* ---- when there is no store at all, it falls back to memory ---- */
+{
+  delete globalThis.window;
+  const S3 = await import("./src/storage.js?fallback");
+  const { starterDoc: starterDoc3 } = await import("./src/model.js?fallback");
+  ok("no window means not persistent", S3.isPersistent() === false);
+  ok("the probe agrees", (await S3.probeStorage()) === false);
+  const docM = { ...starterDoc3(), id: "tl_m", createdAt: "2026-01-01T00:00:00Z" };
+  const entryM = await S3.saveDoc(docM);
+  const backM = await S3.loadDoc("tl_m");
+  ok("saving still works in memory", entryM && entryM.id === "tl_m");
+  ok("loading still works in memory", backM && backM.events.length === docM.events.length);
+  ok("instants survive the memory path", backM.events[0].start.t === docM.events[0].start.t);
+}
+
+console.log("\n" + pass + " passed, " + fail + " failed");
+process.exit(fail ? 1 : 0);

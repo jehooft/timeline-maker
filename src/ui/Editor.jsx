@@ -4,11 +4,15 @@ import React, { useState } from "react";
 import { parseDateInput, fmtInstant } from "../time.js";
 import { SYMBOL_KEYS, SymbolChip } from "../symbols.jsx";
 import { IMAGE_MAX } from "../images.js";
-import { PALETTE, descendantsOf, siblingClash, escapesParent } from "../model.js";
+import { PALETTE, descendantsOf, siblingClash, escapesParent, containedSiblings } from "../model.js";
 
 /* ----------------------------------------------------------------- the editor */
-export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickImage, onClearImage }) {
+export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickImage,
+  onLinkImage, onClearImage }) {
   const [confirming, setConfirming] = useState(false);
+  const [urlDraft, setUrlDraft] = useState("");
+  const [urlOpen, setUrlOpen] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const isEra = draft.kind === "era";
   const startParse = parseDateInput(draft.startStr);
   const endParse = draft.endStr.trim() ? parseDateInput(draft.endStr) : null;
@@ -18,7 +22,7 @@ export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickI
   const cat = doc.categories.find((c) => c.id === draft.cat);
 
   /* Live era-tree checks */
-  let clash = null, escapes = null, parentOptions = [];
+  let clash = null, escapes = null, adoptable = null, parentOptions = [];
   if (isEra) {
     const blocked = draft.id ? descendantsOf(doc.eras, draft.id) : new Set();
     parentOptions = doc.eras.filter((r) => r.cat === draft.cat && !blocked.has(r.id));
@@ -30,9 +34,21 @@ export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickI
       if (endBlank || (endParse && order)) {
         clash = siblingClash(doc.eras, candidate);
         escapes = escapesParent(doc.eras, candidate);
+        /* An overlap that is really containment has a second way out: this era
+           is the broader one, so it can take the eras it covers as children. */
+        if (clash) adoptable = containedSiblings(doc.eras, candidate);
       }
     }
   }
+
+  const onDrop = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) { onPickImage(f); return; }
+    const url = e.dataTransfer && e.dataTransfer.getData("text/uri-list").trim();
+    if (url) onLinkImage(url);
+  };
 
   const valid = draft.title.trim() && startParse && (endBlank || endParse) && order && !clash;
 
@@ -95,10 +111,23 @@ export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickI
           </em>
         </label>
 
-        {clash && (
+        {clash && adoptable && (
+          <div className="notice warn">
+            This era covers {adoptable.length === 1
+              ? <b>{adoptable[0].title}</b>
+              : <><b>{adoptable.length} eras</b> at the same level ({adoptable.map((r) => r.title).join(", ")})</>}
+            . Eras side by side may not overlap, but a broader era can hold {adoptable.length === 1 ? "it" : "them"}.
+            <button className="btn small" style={{ marginTop: 9, display: "block" }}
+              onClick={() => onSave(adoptable.map((r) => r.id))}>
+              Nest {adoptable.length === 1 ? "it" : "them"} inside this era
+            </button>
+          </div>
+        )}
+        {clash && !adoptable && (
           <p className="notice bad">
             Overlaps <b>{clash.title}</b>, which sits at the same level.
-            Eras side by side may touch but not overlap — set “Within” to nest this one instead.
+            Eras side by side may touch but not overlap — set “Within” to nest this one instead,
+            or change the dates so they only meet at the edge.
           </p>
         )}
         {!clash && escapes && (
@@ -157,26 +186,45 @@ export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickI
           </div>
         </div>
 
-        <div className="fld">
+        <div className="fld"
+          onDragOver={(e) => { e.preventDefault(); if (!dragOver) setDragOver(true); }}
+          onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setDragOver(false); }}
+          onDrop={onDrop}>
           <span>Image</span>
           {image ? (
             <div className="imgbox">
               <img src={image.thumb} alt="" />
               <div className="imgmeta">
                 <b>{image.name}</b>
-                <em>{image.w} × {image.h}</em>
+                <em>{image.external ? "linked" : image.w + " × " + image.h}</em>
                 <button className="btn small" onClick={onClearImage}>Remove</button>
               </div>
             </div>
           ) : (
-            <label className="filebtn">
-              Choose an image
-              <input type="file" accept="image/*" onChange={(e) => {
-                const f = e.target.files && e.target.files[0];
-                if (f) onPickImage(f);
-                e.target.value = "";
-              }} />
-            </label>
+            <>
+              <label className={"filebtn" + (dragOver ? " over" : "")}>
+                {dragOver ? "Drop it here" : "Choose an image, or drag one in"}
+                <input type="file" accept="image/*" onChange={(e) => {
+                  const f = e.target.files && e.target.files[0];
+                  if (f) onPickImage(f);
+                  e.target.value = "";
+                }} />
+              </label>
+              {urlOpen ? (
+                <div className="urlrow">
+                  <input value={urlDraft} autoFocus placeholder="https://example.com/picture.jpg"
+                    onChange={(e) => setUrlDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") { onLinkImage(urlDraft); setUrlDraft(""); setUrlOpen(false); }
+                      if (e.key === "Escape") { setUrlOpen(false); setUrlDraft(""); }
+                    }} />
+                  <button className="btn small" disabled={!urlDraft.trim()}
+                    onClick={() => { onLinkImage(urlDraft); setUrlDraft(""); setUrlOpen(false); }}>Use</button>
+                </div>
+              ) : (
+                <button className="btn small linkbtn" onClick={() => setUrlOpen(true)}>Link one by URL</button>
+              )}
+            </>
           )}
           {image && (
             <label className="check">
@@ -185,13 +233,26 @@ export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickI
               <span>Pin above the timeline</span>
             </label>
           )}
-          {image && <em className="hint">Downscaled to {IMAGE_MAX}px on the long side.</em>}
+          {image && (
+            <em className="hint">
+              {image.external
+                ? "Held as a link — costs no storage, but breaks if the address dies."
+                : "Downscaled to " + IMAGE_MAX + "px on the long side."}
+            </em>
+          )}
         </div>
 
         <label className="fld">
           <span>Description</span>
           <textarea rows={4} value={draft.desc} onChange={(e) => onField("desc", e.target.value)}
             placeholder="What happened, and why it matters." />
+        </label>
+
+        <label className="fld">
+          <span>Links <i>one per line</i></span>
+          <textarea rows={2} value={draft.linksStr || ""}
+            onChange={(e) => onField("linksStr", e.target.value)}
+            placeholder="https://en.wikipedia.org/wiki/Donkey_Kong" />
         </label>
 
         <label className="fld">
@@ -212,7 +273,9 @@ export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickI
             <button className="btn" onClick={() => setConfirming(true)}>Delete</button>
           )
         )}
-        <button className="btn primary" disabled={!valid} onClick={onSave} style={{ marginLeft: "auto" }}>
+        {/* onSave takes an optional list of eras to adopt, so the click event
+            must not be passed through as one. */}
+        <button className="btn primary" disabled={!valid} onClick={() => onSave()} style={{ marginLeft: "auto" }}>
           {draft.id ? "Save changes" : "Add to timeline"}
         </button>
       </div>

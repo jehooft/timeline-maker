@@ -7,9 +7,11 @@
 
 import { parseDateInput, instantToInput } from "./time.js";
 import { uid, PALETTE } from "./model.js";
+import { externalImage } from "./images.js";
 
 export const CSV_COLUMNS = ["type", "title", "start", "end", "category", "parent",
-  "symbol", "color", "description", "pin_image", "important", "precision", "tags", "id"];
+  "symbol", "color", "description", "image", "pin_image", "important", "precision",
+  "link", "tags", "id"];
 
 /* ------------------------------------------------------------------ reading */
 
@@ -55,6 +57,10 @@ export function importCSV(text, doc) {
   const byName = new Map(categories.map((c) => [c.name.toLowerCase(), c]));
   const events = [], eras = [], errors = [];
   const pendingParents = [];
+  /* Linked pictures are shared by URL, so the same address used on twenty rows
+     produces one record rather than twenty. */
+  const images = {};
+  const imageByUrl = new Map();
 
   rows.slice(1).forEach((r, n) => {
     const line = n + 2;
@@ -97,6 +103,28 @@ export function importCSV(text, doc) {
     const color = col(r, "color");
     if (/^#[0-9a-f]{6}$/i.test(color)) item.color = color;
 
+    const links = col(r, "link").split(/[;\s]+/).map((s) => s.trim()).filter(Boolean);
+    if (links.length) item.links = links;
+
+    const imgUrl = col(r, "image");
+    if (imgUrl) {
+      let rec = imageByUrl.get(imgUrl);
+      if (!rec) {
+        try {
+          rec = externalImage(imgUrl, title);
+          imageByUrl.set(imgUrl, rec);
+          images[rec.id] = rec;
+        } catch (err) {
+          errors.push("Row " + line + ": " + err.message);
+          rec = null;
+        }
+      }
+      if (rec) item.imageId = rec.id;
+    }
+
+    /* Eras carry pinned pictures too, so this is not an event-only column. */
+    if (item.imageId && truthy(col(r, "pin_image"))) item.pinImage = true;
+
     if (isEra) {
       const p = col(r, "parent");
       if (p) pendingParents.push([item, p, cat.id]);
@@ -104,7 +132,6 @@ export function importCSV(text, doc) {
       eras.push(item);
     } else {
       item.sym = col(r, "symbol") || "dot";
-      if (truthy(col(r, "pin_image"))) item.pinImage = true;
       if (truthy(col(r, "important"))) item.important = true;
       events.push(item);
     }
@@ -120,7 +147,7 @@ export function importCSV(text, doc) {
     else errors.push('Cannot find an era called "' + ref + '" to nest "' + item.title + '" inside');
   }
 
-  return { categories, events, eras, errors };
+  return { categories, events, eras, images, errors };
 }
 
 /* ------------------------------------------------------------------ writing */
@@ -129,6 +156,15 @@ const esc = (v) => {
   const s = v === undefined || v === null ? "" : String(v);
   return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 };
+
+/* Only linked pictures survive a CSV round trip. An uploaded one lives as
+   embedded image data, which a spreadsheet cell cannot hold — those need JSON. */
+export const linkedImageURL = (doc, it) => {
+  const rec = it.imageId ? (doc.images || {})[it.imageId] : null;
+  return rec && rec.external ? rec.url : "";
+};
+export const countsDroppedImages = (doc) =>
+  [...doc.events, ...doc.eras].filter((it) => it.imageId && !linkedImageURL(doc, it)).length;
 
 export function exportCSV(doc) {
   const catName = new Map(doc.categories.map((c) => [c.id, c.name]));
@@ -145,9 +181,11 @@ export function exportCSV(doc) {
     type === "event" ? it.sym || "dot" : "",
     it.color || "",
     it.desc || "",
-    type === "event" && it.pinImage ? "true" : "",
+    linkedImageURL(doc, it),
+    it.pinImage ? "true" : "",
     type === "event" && it.important ? "true" : "",
     it.start.precision,
+    (it.links || []).join("; "),
     (it.tags || []).join("; "),
     it.id,
   ].map(esc).join(","));

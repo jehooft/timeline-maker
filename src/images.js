@@ -36,6 +36,20 @@ export function resample(im, maxSide, quality) {
   if (!out.startsWith("data:image/webp")) out = c.toDataURL("image/jpeg", quality);
   return { url: out, w, h };
 }
+/* A picture held by reference rather than copied in. Costs no storage quota
+   and needs no browser, which is what lets CSV carry pictures at all — but it
+   breaks if the URL dies, and the size is unknown until the browser fetches
+   it, so `w`/`h` stay null and the renderer measures the loaded element. */
+export function externalImage(url, name) {
+  const clean = String(url || "").trim();
+  if (!/^https?:\/\//i.test(clean)) throw new Error("An image link must start with http:// or https://");
+  return {
+    id: "img_" + Math.random().toString(36).slice(2, 9),
+    name: name || clean.split("/").pop().split("?")[0] || "linked image",
+    url: clean, thumb: clean, w: null, h: null, external: true,
+  };
+}
+
 export async function processImage(file) {
   if (!file.type.startsWith("image/")) throw new Error("That file isn't an image.");
   const raw = await fileToDataURL(file);

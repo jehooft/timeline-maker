@@ -7,7 +7,7 @@ import {
 } from "./time.js";
 import { pickStep, majorTicks, tickLabel, precisionForStep } from "./ticks.js";
 import { drawSymbol } from "./symbols.jsx";
-import { processImage } from "./images.js";
+import { processImage, externalImage } from "./images.js";
 import {
   uid, PALETTE, starterDoc, buildIndex, queryRange, packRows, siblingClash,
 } from "./model.js";
@@ -22,7 +22,8 @@ import {
   loadAppState, saveAppState,
   encodeDoc, decodeDoc, downloadFile, safeFileName,
 } from "./storage.js";
-import { importCSV, exportCSV } from "./csv.js";
+import { importCSV, exportCSV, countsDroppedImages } from "./csv.js";
+import { ContextMenu } from "./ui/ContextMenu.jsx";
 import { makeHistory, commit, undo, redo, reset, canUndo, canRedo } from "./history.js";
 import { searchItems } from "./search.js";
 import { clusterPoints, CLUSTER_GAP } from "./cluster.js";
@@ -33,11 +34,33 @@ import { SearchBox } from "./ui/SearchBox.jsx";
 const IMG_H = 96, IMG_GAP = 10, IMG_HANG = 16, IMG_CAP = 14;
 const HEADER_H = 22, ERA_ROW = 22, ROW_H = 26, BAND_GAP = 16;
 const HOVER_DELAY = 800;
+const LONG_PRESS = 520;       // touch equivalent of a right-click
 const TIMEOUT_GUARD = 9000;   // hard ceiling on any one library action
 const ERA_MIN_PX = 26;    // below this an era is a sliver, so drop it
 const ERA_COVER = 0.97;   // covering this much of the viewport counts as filling it
+const ERA_FADE = 0.11;    // seconds; how long an era takes to flatten away
+const DRAWER_W = 330;     // the editor drawer, which the detail card must dodge
+/* localStorage is usually capped around 5 MB per origin, and a timeline that
+   is quietly approaching that should say so while export is still possible. */
+const SIZE_WARN = 2.6e6;
+const EXPORT_NAG = 50;    // edits since the last export before a reminder
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
+
+/* Roughly what this timeline occupies once written out. Pictures dominate, and
+   a linked one costs only its URL, so they are counted as stored rather than
+   guessed at. */
+function estimateBytes(doc) {
+  let n = 0;
+  try {
+    n = JSON.stringify({ ...doc, images: undefined }).length;
+    for (const rec of Object.values(doc.images || {})) {
+      n += rec.external ? (rec.url || "").length + 120 : JSON.stringify(rec).length;
+    }
+  } catch (err) { return 0; }
+  return n;
+}
+const fmtBytes = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + " MB" : Math.round(n / 1e3) + " KB");
 
 function ellipsize(text, maxW, font, measure) {
   if (measure(text, font) <= maxW) return text;
@@ -67,6 +90,14 @@ export default function TimelineApp() {
   const selAnchorRef = useRef({ x: 500, y: 300 });
   const hoverAnchorRef = useRef({ x: 500, y: 200 });
   const hoverTimer = useRef(0);
+  const pressTimer = useRef(0);
+  /* Era id -> how visible it is, 0..1, eased between frames so a level that
+     drops out of the strip flattens away instead of blinking off. */
+  const eraAnimRef = useRef(new Map());
+  const lastFrameRef = useRef(0);
+  const reduceMotionRef = useRef(false);
+  const sizeWarnedRef = useRef(false);
+  const nagRef = useRef(0);
 
   const [, bump] = useReducer((x) => x + 1, 0);
   /* The document lives inside a history, so every edit is undoable. `setDoc`
@@ -103,6 +134,8 @@ export default function TimelineApp() {
   const [expanded, setExpanded] = useState(() => new Set(["earth"]));
   const [editingCat, setEditingCat] = useState(null);
   const [toast, setToast] = useState(null);
+  const [menu, setMenu] = useState(null);      // { item, kind, x, y }
+  const [unexported, setUnexported] = useState(0);
   const saveTimer = useRef(0);
   const skipSave = useRef(true);
 
@@ -179,6 +212,31 @@ export default function TimelineApp() {
   const gotoItem = (raw) => {
     fitRange(raw.start.t, raw.end ? raw.end.t : raw.start.t, raw.start.precision);
     setSelectedId(raw.id);
+  };
+  /* Opening a cluster is about separating its members, not framing its extent.
+     Fitting the extent — which is roughly one pixel wide, since that is why
+     they merged — overshot enormously. So the target zoom comes from the
+     closest pair inside it: land just past the point where that pair stops
+     merging, and the whole cluster has come apart. */
+  const openCluster = (cl) => {
+    const v = viewRef.current;
+    const w = Math.max(1, sizeRef.current.w);
+    const gapPx = CLUSTER_GAP * uiScale;
+    const extent = Math.max(Number(cl.t1 - cl.t0), 0);
+    /* Deep enough that the tightest pair comes apart... */
+    const apart = cl.minGap > 0 ? cl.minGap / (gapPx * 2.4) : 0;
+    /* ...but never so deep that the cluster runs off its own edges. One
+       outlier would otherwise demand a zoom that leaves the rest off screen;
+       framing the whole run and letting a second click drill in is better. */
+    const framed = extent > 0 ? extent / (w * 0.85) : 0;
+    const target = Math.max(apart, framed);
+    /* Always at least one real step in, even for members sharing an instant,
+       which no amount of zoom will separate. */
+    v.spp = Math.max(MIN_SPP, Math.min(MAX_SPP,
+      target > 0 ? Math.min(target, v.spp / 3) : v.spp / 3));
+    v.s = clampT(cl.t0 + (cl.t1 - cl.t0) / 2n);
+    v.f = 0;
+    normalize(v); invalidate();
   };
 
   const measure = useCallback((text, font) => {
@@ -261,7 +319,11 @@ export default function TimelineApp() {
       const rec = doc.images[it.imageId];
       if (!rec) continue;
       const el = getImgEl(it.imageId, rec.url);
-      const iw = Math.max(40, Math.min(Math.round(220 * S), Math.round(imgH * (rec.w / rec.h))));
+      /* A linked picture has no stored size, so its shape comes from the
+         element once the browser has fetched it. */
+      const ratio = rec.w && rec.h ? rec.w / rec.h
+        : el && el.naturalWidth ? el.naturalWidth / Math.max(1, el.naturalHeight) : 4 / 3;
+      const iw = Math.max(40, Math.min(Math.round(220 * S), Math.round(imgH * ratio)));
       const a = xOf(it.t0);
       const b = it.isSpan ? (it.open ? w + 40 : xOf(it.t1)) : a;
       let px = (a + b) / 2;
@@ -274,8 +336,15 @@ export default function TimelineApp() {
       const caption = ellipsize(it.title, capMax, fT, measure);
       const capW = measure(caption, fT);
       const half = Math.max(iw, capW) / 2 + 5;
+      /* Layout runs over a window wider than the screen so pictures are placed
+         before they scroll into view. Priority must not use that window: an
+         important picture already past the edge would keep claiming the front
+         row and push a picture you *can* see into the overflow markers, where
+         it stayed until every important one had left the wider window too.
+         So only what is actually on screen outranks anything. */
+      const onScreen = px + iw / 2 > 0 && px - iw / 2 < w;
       pinnedRaw.push({ key: "img:" + it.id, it, el, iw, x: px, caption, capW,
-        prio: it.important ? 1 : 0, x0: px - half, x1: px + half });
+        prio: it.important && onScreen ? 1 : 0, x0: px - half, x1: px + half });
     }
     const maxImgRows = Math.max(1, Math.floor((h * 0.5 - 40) / imgRow));
     const packedImgs = packRows(pinnedRaw, 8, prevRowsRef.current, 1);
@@ -324,6 +393,16 @@ export default function TimelineApp() {
     let y = BAND_TOP - v.scrollY;
     let contentH = 0;
 
+    /* Frame-rate independent easing, so the flatten reads the same on a 60Hz
+       and a 144Hz screen. */
+    const anim = eraAnimRef.current;
+    const nowMs = typeof performance !== "undefined" ? performance.now() : Date.now();
+    let dt = (nowMs - lastFrameRef.current) / 1000;
+    lastFrameRef.current = nowMs;
+    if (!(dt > 0) || dt > 0.25) dt = 1 / 60;      // first frame, or back from a stall
+    const ease = reduceMotionRef.current ? 1 : 1 - Math.exp(-dt / ERA_FADE);
+    let animating = false;
+
     for (const cat of doc.categories) {
       if (hidden.has(cat.id)) continue;
       const bucket = byCat.get(cat.id) || { eras: [], events: [] };
@@ -339,11 +418,39 @@ export default function TimelineApp() {
         const visW = Math.min(er.x2p, w) - Math.max(er.x1p, 0);
         if (visW >= w * ERA_COVER && er.depth > deepestCovering) deepestCovering = er.depth;
       }
-      const shownEras = bucket.eras.filter(
-        (er) => er.depth >= deepestCovering && er.x2p - er.x1p >= ERA_MIN_PX);
-      const levels = [...new Set(shownEras.map((er) => er.depth))].sort((a, b) => a - b);
-      const rowOfDepth = new Map(levels.map((d, i) => [d, i]));
-      const eraLevels = levels.length;
+      const shownIds = new Set(bucket.eras
+        .filter((er) => er.depth >= deepestCovering && er.x2p - er.x1p >= ERA_MIN_PX)
+        .map((er) => er.id));
+
+      /* Ease each era toward shown/hidden. An era seen for the first time takes
+         its target outright — otherwise everything would fade in on load, and
+         panning would fade in whatever crosses the edge. */
+      for (const er of bucket.eras) {
+        const target = shownIds.has(er.id) ? 1 : 0;
+        const prev = anim.get(er.id);
+        if (prev === undefined || reduceMotionRef.current) { anim.set(er.id, target); continue; }
+        if (prev === target) continue;
+        let next = prev + (target - prev) * ease;
+        if (Math.abs(target - next) < 0.012) next = target; else animating = true;
+        anim.set(er.id, next);
+      }
+      const visOf = (er) => anim.get(er.id) ?? 0;
+      /* Anything mid-flatten still draws, at the height and alpha it has left. */
+      const drawEras = bucket.eras.filter((er) => visOf(er) > 0.012);
+
+      /* A whole level collapses together, so its row height is driven by the
+         most-visible era on it — and later levels slide up as it goes. */
+      const levelVis = new Map();
+      for (const er of drawEras) {
+        levelVis.set(er.depth, Math.max(levelVis.get(er.depth) ?? 0, visOf(er)));
+      }
+      const levels = [...levelVis.keys()].sort((a, b) => a - b);
+      const rowTopOf = new Map();
+      let stripAcc = 0;
+      for (const d of levels) {
+        rowTopOf.set(d, stripAcc);
+        stripAcc += eraRow * levelVis.get(d);
+      }
 
       /* Merge point events that land on top of each other before packing, so
          a thousand events in one pixel become one marker rather than a
@@ -358,8 +465,8 @@ export default function TimelineApp() {
         : Math.max(1, packedEvents.rows + (clusters.length ? 1 : 0));
 
       const stripTop = y + headerH;
-      const stripH = eraLevels * eraRow;
-      const contentTop = stripTop + stripH + (stripH && evRows ? 4 : 0);
+      const stripH = stripAcc;
+      const contentTop = stripTop + stripH + (stripH > 0.5 && evRows ? 4 : 0);
       const contentBottom = contentTop + evRows * rowH;
       const bandH = contentBottom - y + bandGap;
       const bandTop = y;
@@ -372,12 +479,12 @@ export default function TimelineApp() {
       if (bandTop + bandH > AXIS_Y && bandTop < h) {
         /* 3a. background tint — each era colours the band beneath it, and
            nesting compounds, so deeper structure reads as richer colour */
-        const sorted = [...shownEras].sort((a, b) => a.depth - b.depth);
+        const sorted = [...drawEras].sort((a, b) => a.depth - b.depth);
         for (const er of sorted) {
           const color = er.color || cat.color;
           const bx1 = Math.max(-30, er.x1p), bx2 = Math.min(w + 30, er.x2p);
           if (bx2 <= bx1) continue;
-          ctx.globalAlpha = aTint;
+          ctx.globalAlpha = aTint * visOf(er);
           ctx.fillStyle = color;
           ctx.fillRect(bx1, stripTop, bx2 - bx1, contentBottom - stripTop);
         }
@@ -386,7 +493,7 @@ export default function TimelineApp() {
         /* 3b. boundary lines run the full height of the band */
         for (const er of sorted) {
           const color = er.color || cat.color;
-          ctx.globalAlpha = 0.2 / (1 + er.depth * 0.6);
+          ctx.globalAlpha = (0.2 / (1 + er.depth * 0.6)) * visOf(er);
           ctx.strokeStyle = color;
           for (const bx of [er.x1p, er.open ? null : er.x2p]) {
             if (bx === null || bx < -1 || bx > w + 1) continue;
@@ -400,24 +507,32 @@ export default function TimelineApp() {
 
         /* 3c. the era strip: one continuous bar per depth level */
         for (const er of sorted) {
-          const top = stripTop + rowOfDepth.get(er.depth) * eraRow;
-          if (top + eraRow < AXIS_Y + rulerPad || top > h) continue;
+          const a = visOf(er);
+          const barH = eraRow * (levelVis.get(er.depth) ?? 0);
+          if (barH < 2) continue;
+          const top = stripTop + rowTopOf.get(er.depth);
+          if (top + barH < AXIS_Y + rulerPad || top > h) continue;
           const color = er.color || cat.color;
           const sel = selectedId === er.id, hov = hover && hover.id === er.id;
           const bx1 = Math.max(-30, er.x1p), bx2 = Math.min(w + 30, er.x2p);
           if (bx2 <= bx1) continue;
+          const inner = Math.max(1, barH - 3);
 
-          ctx.globalAlpha = sel || hov ? Math.min(1, aEra + 0.2) : aEra;
+          ctx.globalAlpha = (sel || hov ? Math.min(1, aEra + 0.2) : aEra) * a;
           ctx.fillStyle = color;
-          ctx.fillRect(bx1, top + 1, bx2 - bx1, eraRow - 3);
+          ctx.fillRect(bx1, top + 1, bx2 - bx1, inner);
           ctx.globalAlpha = 1;
           /* hairline seam so abutting eras stay legible as separate bars */
           if (er.x1p > 0 && er.x1p < w) {
+            ctx.globalAlpha = a;
             ctx.fillStyle = cInk;
-            ctx.fillRect(Math.round(er.x1p), top + 1, 1, eraRow - 3);
+            ctx.fillRect(Math.round(er.x1p), top + 1, 1, inner);
+            ctx.globalAlpha = 1;
           }
 
-          if (showLabels) {
+          /* The label goes before the bar does — a half-height row has no room
+             for type, and shrinking text would read as a glitch. */
+          if (showLabels && barH > eraRow * 0.72) {
             const visL = Math.max(bx1, 4), visR = Math.min(bx2, w - 4);
             const room = visR - visL - 10;
             if (room > 18) {
@@ -425,14 +540,18 @@ export default function TimelineApp() {
               const lw = measure(label, fT);
               ctx.font = fT;
               ctx.fillStyle = cText;
-              ctx.globalAlpha = sel || hov ? 1 : 0.85;
-              ctx.fillText(label, (visL + visR) / 2 - lw / 2, top + eraRow * 0.68);
+              ctx.globalAlpha = (sel || hov ? 1 : 0.85) * a;
+              ctx.fillText(label, (visL + visR) / 2 - lw / 2, top + barH * 0.68);
               ctx.globalAlpha = 1;
             }
           }
-          const ax = Math.max(20, Math.min(w - 20, (Math.max(bx1, 0) + Math.min(bx2, w)) / 2));
-          hits.push({ item: er, x: ax, y: top + eraRow / 2, x0: bx1, x1: bx2, y0: top, y1: top + eraRow - 2 });
-          if (er.id === selectedId) selAnchorRef.current = { x: ax, y: top + eraRow / 2 };
+          /* Half-faded eras are not clickable: hitting something you can barely
+             see is worse than having to wait out a tenth of a second. */
+          if (a > 0.55) {
+            const ax = Math.max(20, Math.min(w - 20, (Math.max(bx1, 0) + Math.min(bx2, w)) / 2));
+            hits.push({ item: er, x: ax, y: top + barH / 2, x0: bx1, x1: bx2, y0: top, y1: top + barH - 2 });
+            if (er.id === selectedId) selAnchorRef.current = { x: ax, y: top + barH / 2 };
+          }
         }
       }
 
@@ -562,13 +681,26 @@ export default function TimelineApp() {
       const pcat = doc.categories.find((c) => c.id === p.it.cat);
       const color = p.it.color || (pcat ? pcat.color : cMuted);
 
+      /* Out of headroom. A bare dot read as "the picture is gone", so this is
+         drawn as a shrunken frame instead — clearly a collapsed picture, and
+         still clickable. */
       if (p.row >= maxImgRows) {
         if (p.x > -10 && p.x < w + 10) {
-          ctx.fillStyle = color; ctx.globalAlpha = 0.8;
-          ctx.fillRect(p.x - 4, AXIS_Y - 12, 8, 8);
+          const mw = 14, mh = 11, mx = Math.round(p.x - mw / 2), my = AXIS_Y - 15;
+          ctx.globalAlpha = sel || hov ? 0.22 : 0.14;
+          ctx.fillStyle = color;
+          ctx.fillRect(mx, my, mw, mh);
+          ctx.globalAlpha = sel || hov ? 1 : 0.75;
+          ctx.strokeStyle = color;
+          ctx.strokeRect(mx + 0.5, my + 0.5, mw - 1, mh - 1);
+          ctx.beginPath();
+          ctx.moveTo(mx + 2.5, my + mh - 3.5);
+          ctx.lineTo(mx + 5.5, my + mh - 6.5);
+          ctx.lineTo(mx + 8.5, my + mh - 3.5);
+          ctx.stroke();
           ctx.globalAlpha = 1;
           hits.push({ item: p.it, isImage: true, x: p.x, y: AXIS_Y - 8,
-            x0: p.x - 7, x1: p.x + 7, y0: AXIS_Y - 15, y1: AXIS_Y - 1 });
+            x0: mx - 3, x1: mx + mw + 3, y0: my - 2, y1: AXIS_Y - 1 });
         }
         continue;
       }
@@ -676,9 +808,27 @@ export default function TimelineApp() {
       ctx.fillStyle = cRule;
       ctx.fillRect(w - 6, thumbY, 3, thumbH);
     }
-  }, [doc, index, showLabels, selectedId, hover, collapsed, uiScale, hidden, theme, measure]);
+
+    /* Idle stays at zero cost: another frame is only asked for while something
+       is still easing. Every value snaps to its target once it is close, so
+       this always terminates. */
+    if (animating) invalidate();
+  }, [doc, index, showLabels, selectedId, hover, collapsed, uiScale, hidden, theme,
+    measure, invalidate]);
 
   useEffect(() => { renderRef.current = render; render(); }, [render]);
+
+  /* Respect the system setting: the era flatten is decoration, and for anyone
+     who has asked for less motion it should just be a cut. */
+  useEffect(() => {
+    if (!window.matchMedia) return undefined;
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const sync = () => { reduceMotionRef.current = mq.matches; };
+    sync();
+    if (mq.addEventListener) { mq.addEventListener("change", sync); return () => mq.removeEventListener("change", sync); }
+    mq.addListener(sync);
+    return () => mq.removeListener(sync);
+  }, []);
 
   /* --------------------------------------------------------------- interaction */
   const hitTest = (px, py) => {
@@ -737,16 +887,41 @@ export default function TimelineApp() {
     return () => canvas.removeEventListener("wheel", onWheel);
   }, []);
 
+  const clearPressTimer = () => { if (pressTimer.current) { clearTimeout(pressTimer.current); pressTimer.current = 0; } };
+  /* Right-click and long-press open the same menu. */
+  const openMenuAt = (px, py) => {
+    const hh = hitTest(px, py);
+    if (!hh || hh.isCluster) { setMenu(null); return false; }
+    const kind = hh.item.kind === "era" ? "era" : "event";
+    setMenu({ item: hh.item, kind, x: px + 4, y: py + 4 });
+    setSelectedId(hh.item.id);
+    selAnchorRef.current = { x: hh.x, y: hh.y };
+    setPreview(null);
+    return true;
+  };
+
   const onPointerDown = (e) => {
     e.currentTarget.setPointerCapture(e.pointerId);
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     dragState.current = { moved: 0 };
     if (searchOpen) setSearchOpen(false);
+    if (menu) setMenu(null);
     clearHoverTimer();
+    clearPressTimer();
     if (preview) setPreview(null);
     if (pointers.current.size === 2) {
       const [a, b] = [...pointers.current.values()];
       pinch.current = { dist: Math.hypot(a.x - b.x, a.y - b.y), mid: (a.x + b.x) / 2 };
+    } else if (e.pointerType === "touch") {
+      const r = e.currentTarget.getBoundingClientRect();
+      const px = e.clientX - r.left, py = e.clientY - r.top;
+      pressTimer.current = setTimeout(() => {
+        pressTimer.current = 0;
+        /* only if the finger stayed put — otherwise this was a pan */
+        if (dragState.current && dragState.current.moved < 6 && openMenuAt(px, py)) {
+          dragState.current.handled = true;
+        }
+      }, LONG_PRESS);
     }
   };
   const onPointerMove = (e) => {
@@ -756,6 +931,8 @@ export default function TimelineApp() {
     const cur = { x: e.clientX, y: e.clientY };
     pointers.current.set(e.pointerId, cur);
     if (dragState.current) dragState.current.moved += Math.abs(cur.x - prev.x) + Math.abs(cur.y - prev.y);
+    if (pressTimer.current && dragState.current && dragState.current.moved >= 6) clearPressTimer();
+    if (dragState.current && dragState.current.handled) return;
     if (pointers.current.size === 2 && pinch.current) {
       const [a, b] = [...pointers.current.values()];
       const dist = Math.hypot(a.x - b.x, a.y - b.y);
@@ -773,13 +950,13 @@ export default function TimelineApp() {
     pointers.current.delete(e.pointerId);
     if (pointers.current.size < 2) pinch.current = null;
     dragState.current = null;
+    clearPressTimer();
+    if (ds && ds.handled) return;      // the long-press already acted
     if (ds && ds.moved < 5) {
       const hh = hitTest(e.clientX - r.left, e.clientY - r.top);
       if (hh && hh.isCluster) {
         /* a cluster is a navigation aid, not a thing: open what it holds */
-        const cl = hh.item;
-        const pad = (cl.t1 - cl.t0) / 6n || 1n;
-        fitRange(cl.t0 - pad, cl.t1 + pad, "second");
+        openCluster(hh.item);
         setPreview(null);
       } else if (hh) {
         selAnchorRef.current = { x: hh.x, y: hh.y };
@@ -788,7 +965,8 @@ export default function TimelineApp() {
       } else setSelectedId(null);
     }
   };
-  const onPointerLeave = () => { clearHoverTimer(); setHover(null); setPreview(null); };
+  const onPointerLeave = () => { clearHoverTimer(); clearPressTimer(); setHover(null); setPreview(null); };
+  useEffect(() => clearPressTimer, []);
 
   /* ------------------------------------------------------------------- editing */
   const centreInstant = () => {
@@ -800,7 +978,7 @@ export default function TimelineApp() {
     return {
       kind, id: null, title: "", cat: doc.categories[0] ? doc.categories[0].id : "",
       parent: "", sym: "dot", color: "", startStr: instantToInput(c.t, c.precision), endStr: "",
-      desc: "", tagsStr: "", imageId: "", pinImage: false, important: false,
+      desc: "", tagsStr: "", linksStr: "", imageId: "", pinImage: false, important: false,
     };
   };
   const draftFrom = (item, kind) => ({
@@ -809,12 +987,16 @@ export default function TimelineApp() {
     startStr: instantToInput(item.start.t, item.start.precision),
     endStr: item.end ? instantToInput(item.end.t, item.end.precision) : "",
     desc: item.desc || "", tagsStr: (item.tags || []).join(", "),
+    linksStr: (item.links || []).join("\n"),
     imageId: item.imageId || "", pinImage: !!item.pinImage,
     important: !!item.important,
   });
   const onField = (k, val) => setDraft((d) => ({ ...d, [k]: val }));
 
-  const saveDraft = () => {
+  /* `adoptIds` names eras this one should take as children — the resolution
+     offered when a new era turns out to be the broader of two that overlap. */
+  const saveDraft = (adoptIds) => {
+    const adopt = Array.isArray(adoptIds) && adoptIds.length ? adoptIds : null;
     const start = parseDateInput(draft.startStr);
     if (!start || !draft.title.trim()) return;
     const end = draft.endStr.trim() ? parseDateInput(draft.endStr) : null;
@@ -825,6 +1007,8 @@ export default function TimelineApp() {
       desc: draft.desc.trim(),
       tags: draft.tagsStr.split(",").map((s) => s.trim()).filter(Boolean),
     };
+    const links = (draft.linksStr || "").split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean);
+    if (links.length) obj.links = links;
     if (draft.color) obj.color = draft.color;
     if (draft.imageId) { obj.imageId = draft.imageId; obj.pinImage = !!draft.pinImage; }
     if (isEra) obj.parent = draft.parent || null;
@@ -833,17 +1017,23 @@ export default function TimelineApp() {
       if (draft.important) obj.important = true;
     }
 
-    if (isEra && siblingClash(doc.eras, obj)) return;
+    /* Adopting resolves the overlap, so the clash check is against the tree as
+       it will be, not as it is. */
+    if (isEra && !adopt && siblingClash(doc.eras, obj)) return;
 
     const list = isEra ? "eras" : "events";
     setDoc((d) => {
       const arr = d[list];
       const i = arr.findIndex((x) => x.id === obj.id);
-      return { ...d, [list]: i >= 0 ? arr.map((x) => (x.id === obj.id ? obj : x)) : [...arr, obj] };
+      let next = i >= 0 ? arr.map((x) => (x.id === obj.id ? obj : x)) : [...arr, obj];
+      if (adopt) next = next.map((r) => (adopt.includes(r.id) ? { ...r, parent: obj.id } : r));
+      return { ...d, [list]: next };
     }, draft.id ? "save:" + obj.id : null);
     setSelectedId(obj.id);
     setDraft(null);
-    setToast(draft.id ? "Saved" : "Added to timeline");
+    setToast(adopt
+      ? "Saved — " + adopt.length + (adopt.length === 1 ? " era now sits" : " eras now sit") + " inside it"
+      : draft.id ? "Saved" : "Added to timeline");
   };
   const deleteDraft = () => {
     const isEra = draft.kind === "era";
@@ -871,6 +1061,71 @@ export default function TimelineApp() {
     }
   };
   const clearImage = () => setDraft((d) => ({ ...d, imageId: "", pinImage: false }));
+  const linkImage = (url) => {
+    try {
+      const rec = externalImage(url);
+      setDoc((d) => ({ ...d, images: { ...d.images, [rec.id]: rec } }));
+      setDraft((dr) => ({ ...dr, imageId: rec.id }));
+    } catch (err) {
+      setToast(err.message);
+    }
+  };
+
+  /* ------------------------------------------------------- the context menu */
+  const rawOf = (item) => (item.kind === "era"
+    ? doc.eras.find((r) => r.id === item.id)
+    : doc.events.find((e) => e.id === item.id));
+
+  const menuEdit = () => {
+    const raw = rawOf(menu.item);
+    if (raw) setDraft(draftFrom(raw, menu.kind));
+    setMenu(null);
+  };
+  const menuDuplicate = () => {
+    const raw = rawOf(menu.item);
+    setMenu(null);
+    if (!raw) return;
+    /* An era copied in place would sit exactly on top of its original, which
+       the tree forbids — so it opens in the editor for the dates to be sorted
+       out first. An event has no such rule and is copied outright. */
+    if (menu.kind === "era") {
+      setDraft({ ...draftFrom(raw, "era"), id: null, title: raw.title + " (copy)" });
+      return;
+    }
+    const copy = { ...raw, id: uid("e"), title: raw.title + " (copy)" };
+    setDoc((d) => ({ ...d, events: [...d.events, copy] }));
+    setSelectedId(copy.id);
+    setToast("Duplicated");
+  };
+  const menuTogglePin = () => {
+    const { item, kind } = menu;
+    const list = kind === "era" ? "eras" : "events";
+    setMenu(null);
+    if (!item.imageId) return;
+    setDoc((d) => ({
+      ...d,
+      [list]: d[list].map((x) => (x.id === item.id ? { ...x, pinImage: !x.pinImage } : x)),
+    }));
+    setToast(item.pinImage ? "Picture unpinned" : "Picture pinned above the axis");
+  };
+  const menuDelete = () => {
+    const { item, kind } = menu;
+    const list = kind === "era" ? "eras" : "events";
+    setMenu(null);
+    setDoc((d) => {
+      const next = { ...d, [list]: d[list].filter((x) => x.id !== item.id) };
+      /* children of a deleted era move up rather than vanishing */
+      if (kind === "era") {
+        const gone = d.eras.find((r) => r.id === item.id);
+        next.eras = next.eras.map((r) => (r.parent === item.id
+          ? { ...r, parent: gone ? gone.parent || null : null } : r));
+      }
+      return next;
+    });
+    if (selectedId === item.id) setSelectedId(null);
+    if (draft && draft.id === item.id) setDraft(null);
+    setToast("Deleted");
+  };
 
   /* ---------------------------------------------------------------- categories */
   const addCategory = () => {
@@ -980,7 +1235,8 @@ export default function TimelineApp() {
       else if (k === "n") { setDraft(blankDraft("event")); e.preventDefault(); }
       else if (k === "b") { setPanelOpen((p) => !p); e.preventDefault(); }
       else if (e.key === "Escape") {
-        setShowHelp(false); setDraft(null); setSelectedId(null); setSearchOpen(false);
+        setShowHelp(false); setDraft(null); setSelectedId(null);
+        setSearchOpen(false); setMenu(null);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1046,6 +1302,7 @@ export default function TimelineApp() {
     if (!booted) return undefined;
     if (skipSave.current) { skipSave.current = false; return undefined; }
     setSaveState("dirty");
+    setUnexported((n) => n + 1);
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
       try {
@@ -1057,6 +1314,14 @@ export default function TimelineApp() {
           const next = [...prev]; next[i] = entry; return next;
         });
         setSaveState("saved");
+        /* Said once per session: a warning that repeats every save is noise,
+           and the answer to it (export) does not change. */
+        const bytes = estimateBytes(doc);
+        if (bytes > SIZE_WARN && !sizeWarnedRef.current) {
+          sizeWarnedRef.current = true;
+          setToast("This timeline is about " + fmtBytes(bytes)
+            + " — near what a browser will keep. Export it while you can.");
+        }
       } catch (err) {
         setSaveState("error");
         setToast(err.message || "Could not save.");
@@ -1064,6 +1329,16 @@ export default function TimelineApp() {
     }, 800);
     return () => clearTimeout(saveTimer.current);
   }, [doc, booted]);
+
+  /* Browser storage can be cleared by the browser or the user without warning,
+     so export is the real save. Nag on the way past every 50 edits. */
+  useEffect(() => {
+    if (!booted) return;
+    if (unexported - nagRef.current >= EXPORT_NAG) {
+      nagRef.current = unexported;
+      setToast(unexported + " changes since the last export — Timelines → Export JSON keeps a copy.");
+    }
+  }, [unexported, booted]);
 
   useEffect(() => {
     if (booted) saveAppState({ lastOpenedId: doc.id, uiScale, showLabels, theme });
@@ -1087,7 +1362,12 @@ export default function TimelineApp() {
     setHidden(new Set());
     setSelectedId(null);
     setDraft(null);
+    setMenu(null);
     setLibraryOpen(false);
+    eraAnimRef.current = new Map();
+    sizeWarnedRef.current = false;
+    setUnexported(0);
+    nagRef.current = 0;
   };
   const openTimeline = async (id) => {
     if (id === doc.id) { setLibraryOpen(false); return; }
@@ -1141,15 +1421,22 @@ export default function TimelineApp() {
   };
 
   /* -------------------------------------------------------------- files in/out */
+  const markExported = () => { setUnexported(0); nagRef.current = 0; };
   const exportJSON = () => {
     downloadFile(safeFileName(doc.name) + ".timeline.json",
       JSON.stringify(encodeDoc(doc, { withImages: true }), null, 2), "application/json");
+    markExported();
     setToast("Exported, pictures included");
   };
   const exportCSVFile = () => {
-    const hasImages = [...doc.events, ...doc.eras].some((i) => i.imageId);
+    /* Linked pictures travel as their URL; uploaded ones cannot fit in a cell. */
+    const dropped = countsDroppedImages(doc);
     downloadFile(safeFileName(doc.name) + ".csv", exportCSV(doc), "text/csv");
-    setToast(hasImages ? "Exported — CSV cannot carry pictures" : "Exported");
+    markExported();
+    setToast(dropped
+      ? "Exported — " + dropped + " uploaded picture" + (dropped === 1 ? "" : "s")
+        + " left behind; JSON keeps them"
+      : "Exported");
   };
   const importFile = async (file) => {
     setBusy(true);
@@ -1169,6 +1456,7 @@ export default function TimelineApp() {
           categories: res.categories,
           events: [...d0.events, ...res.events],
           eras: [...d0.eras, ...res.eras],
+          images: { ...d0.images, ...res.images },
         }));
         setLibraryOpen(false);
         const n = res.events.length + res.eras.length;
@@ -1183,6 +1471,9 @@ export default function TimelineApp() {
   };
 
   /* ------------------------------------------------------------------ readouts */
+  /* Only measured while the dialog that shows it is actually open. */
+  const libSizeNote = useMemo(
+    () => (libraryOpen ? fmtBytes(estimateBytes(doc)) : ""), [libraryOpen, doc]);
   const v = viewRef.current;
   const span = v.spp * sizeRef.current.w;
   const centrePrec = precisionForStep(pickStep(140 * v.spp));
@@ -1266,32 +1557,44 @@ export default function TimelineApp() {
             onPointerDown={onPointerDown} onPointerMove={onPointerMove}
             onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
             onPointerLeave={onPointerLeave}
+            onContextMenu={(e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              /* Only swallow the browser menu when there is something to act on. */
+              if (openMenuAt(e.clientX - r.left, e.clientY - r.top)) e.preventDefault();
+            }}
             onDoubleClick={(e) => {
               const r = e.currentTarget.getBoundingClientRect();
               zoomAt(e.clientX - r.left, 1 / 4);
             }} />
 
-          {selectedItem && !draft && (
+          {/* These stay up while the editor is open: looking something else up
+              is exactly what you need mid-edit. The drawer sits above them, so
+              they only have to dodge the space it takes. */}
+          {selectedItem && (
             <DetailCard item={selectedItem} doc={doc} stage={sizeRef.current}
-              anchor={selAnchorRef.current}
+              anchor={selAnchorRef.current} rightInset={draft ? DRAWER_W : 0}
               onClose={() => setSelectedId(null)}
               onEdit={(item) => {
-                const raw = item.kind === "era"
-                  ? doc.eras.find((r) => r.id === item.id)
-                  : doc.events.find((e) => e.id === item.id);
+                const raw = rawOf(item);
                 if (raw) setDraft(draftFrom(raw, item.kind));
               }} />
           )}
 
-          {previewItem && !selectedItem && !draft && (
+          {previewItem && !selectedItem && (
             <DetailCard item={previewItem} doc={doc} stage={sizeRef.current}
-              anchor={hoverAnchorRef.current} preview />
+              anchor={hoverAnchorRef.current} rightInset={draft ? DRAWER_W : 0} preview />
           )}
 
           {draft && (
             <Editor draft={draft} doc={doc} onField={onField} onSave={saveDraft}
               onDelete={deleteDraft} onClose={() => setDraft(null)}
-              onPickImage={pickImage} onClearImage={clearImage} />
+              onPickImage={pickImage} onLinkImage={linkImage} onClearImage={clearImage} />
+          )}
+
+          {menu && (
+            <ContextMenu menu={menu} stage={sizeRef.current} onClose={() => setMenu(null)}
+              onEdit={menuEdit} onDuplicate={menuDuplicate}
+              onTogglePin={menuTogglePin} onDelete={menuDelete} />
           )}
 
           {showHelp && (
@@ -1304,6 +1607,7 @@ export default function TimelineApp() {
               <p><kbd>Ctrl</kbd>+<kbd>F</kbd> search · <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo</p>
               <p><kbd>Tab</kbd> next item · <kbd>L</kbd> theme · <kbd>Esc</kbd> close</p>
               <p style={{ marginTop: 8, opacity: .8 }}>Rest on a pinned picture to peek at its card.</p>
+              <p style={{ opacity: .8 }}>Right-click an item (or hold on touch) for more.</p>
             </div>
           )}
 
@@ -1316,6 +1620,7 @@ export default function TimelineApp() {
 
           {libraryOpen && (
             <Library entries={entries} currentId={doc.id} busy={busy} persistent={persistent}
+              unexported={unexported} sizeNote={libSizeNote}
               onOpen={openTimeline} onNew={newTimeline} onDuplicate={duplicateTimeline}
               onDelete={removeTimeline} onExportJSON={exportJSON} onExportCSV={exportCSVFile}
               onImportFile={importFile} onClose={() => setLibraryOpen(false)} />
