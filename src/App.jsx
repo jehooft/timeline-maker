@@ -9,7 +9,7 @@ import { pickStep, majorTicks, tickLabel, precisionForStep } from "./ticks.js";
 import { drawSymbol } from "./symbols.jsx";
 import { processImage, externalImage } from "./images.js";
 import {
-  uid, PALETTE, starterDoc, buildIndex, queryRange, packRows, siblingClash,
+  uid, PALETTE, starterDoc, buildIndex, queryRange, packRows, packLanes, siblingClash,
 } from "./model.js";
 import { ScaleRail } from "./ui/ScaleRail.jsx";
 import { DetailCard } from "./ui/DetailCard.jsx";
@@ -38,7 +38,11 @@ const LONG_PRESS = 520;       // touch equivalent of a right-click
 const TIMEOUT_GUARD = 9000;   // hard ceiling on any one library action
 const ERA_MIN_PX = 26;    // below this an era is a sliver, so drop it
 const ERA_COVER = 0.97;   // covering this much of the viewport counts as filling it
-const ERA_FADE = 0.11;    // seconds; how long an era takes to flatten away
+/* Easing time constants, in seconds. A value settles after roughly 4.6 of
+   these, so ERA_FADE 0.22 is about a second. */
+const ERA_FADE = 0.22;    // how long an era takes to flatten away
+const IMG_FADE = 0.22;    // a picture shrinking away, or popping back out
+const MOVE_TAU = 0.14;    // vertical glide when rows repack under a zoom or pan
 const DRAWER_W = 330;     // the editor drawer, which the detail card must dodge
 /* localStorage is usually capped around 5 MB per origin, and a timeline that
    is quietly approaching that should say so while export is still possible. */
@@ -91,9 +95,14 @@ export default function TimelineApp() {
   const hoverAnchorRef = useRef({ x: 500, y: 200 });
   const hoverTimer = useRef(0);
   const pressTimer = useRef(0);
-  /* Era id -> how visible it is, 0..1, eased between frames so a level that
-     drops out of the strip flattens away instead of blinking off. */
-  const eraAnimRef = useRef(new Map());
+  /* Eased-between-frames state, so nothing on the canvas moves or vanishes in
+     one jump. Keys are item keys; entries not touched by a frame are dropped,
+     which is what makes something scrolling back into view appear where it
+     belongs rather than sliding in from wherever it was left. */
+  const eraAnimRef = useRef(new Map());    // era id  -> visible 0..1
+  const rowAnimRef = useRef(new Map());    // item    -> fractional row
+  const visAnimRef = useRef(new Map());    // picture -> shown 0..1
+  const miscAnimRef = useRef(new Map());   // odds and ends, e.g. the axis line
   const lastFrameRef = useRef(0);
   const reduceMotionRef = useRef(false);
   const sizeWarnedRef = useRef(false);
@@ -306,6 +315,40 @@ export default function TimelineApp() {
     const hits = [];
     const newRows = new Map();
 
+    /* Frame-rate independent easing, so everything settles in the same wall
+       time on a 60Hz and a 144Hz screen. */
+    const reduce = reduceMotionRef.current;
+    const nowMs = typeof performance !== "undefined" ? performance.now() : Date.now();
+    let dt = (nowMs - lastFrameRef.current) / 1000;
+    lastFrameRef.current = nowMs;
+    if (!(dt > 0) || dt > 0.25) dt = 1 / 60;      // first frame, or back from a stall
+    const rate = (tau) => (reduce ? 1 : 1 - Math.exp(-dt / tau));
+    const kEra = rate(ERA_FADE), kImg = rate(IMG_FADE), kMove = rate(MOVE_TAU);
+    let animating = false;
+
+    /* Eases `key` toward `target` and returns where it is now. A value already
+       within `snap` lands exactly, so a frame is never asked for to close a
+       gap nobody can see. First sight takes the target outright. */
+    const seen = { row: new Set(), vis: new Set(), era: new Set() };
+    const ease = (map, key, target, k, snap) => {
+      const prev = map.get(key);
+      if (prev === undefined || reduce) { map.set(key, target); return target; }
+      if (prev === target) return target;
+      let next = prev + (target - prev) * k;
+      if (Math.abs(target - next) < snap) next = target; else animating = true;
+      map.set(key, next);
+      return next;
+    };
+    const easeRow = (key, target) => {
+      seen.row.add(key);
+      return ease(rowAnimRef.current, key, target, kMove, 0.004);
+    };
+    const easeVis = (key, target) => {
+      seen.vis.add(key);
+      return ease(visAnimRef.current, key, target, kImg, 0.006);
+    };
+    const easePx = (key, target) => ease(miscAnimRef.current, key, target, kMove, 0.25);
+
     const layoutT0 = tOf(-w * 0.5), layoutT1 = tOf(w * 1.5);
     const visible = queryRange(index, layoutT0, layoutT1);
 
@@ -336,21 +379,26 @@ export default function TimelineApp() {
       const caption = ellipsize(it.title, capMax, fT, measure);
       const capW = measure(caption, fT);
       const half = Math.max(iw, capW) / 2 + 5;
-      /* Layout runs over a window wider than the screen so pictures are placed
-         before they scroll into view. Priority must not use that window: an
-         important picture already past the edge would keep claiming the front
-         row and push a picture you *can* see into the overflow markers, where
-         it stayed until every important one had left the wider window too.
-         So only what is actually on screen outranks anything. */
-      const onScreen = px + iw / 2 > 0 && px - iw / 2 < w;
+      /* Importance carries no layout weight of its own — a picture sits wherever
+         it fits, marked or not. It only decides who keeps a lane when the lanes
+         run out. See packLanes. */
       pinnedRaw.push({ key: "img:" + it.id, it, el, iw, x: px, caption, capW,
-        prio: it.important && onScreen ? 1 : 0, x0: px - half, x1: px + half });
+        important: !!it.important, x0: px - half, x1: px + half });
     }
     const maxImgRows = Math.max(1, Math.floor((h * 0.5 - 40) / imgRow));
-    const packedImgs = packRows(pinnedRaw, 8, prevRowsRef.current, 1);
-    const usedImgRows = Math.min(packedImgs.rows, maxImgRows);
-    const AXIS_Y = pinnedRaw.length
-      ? Math.max(axisMin, 20 + usedImgRows * imgRow + imgHang) : axisMin;
+    const packedImgs = packLanes(pinnedRaw, 8, maxImgRows);
+
+    /* A dropped picture keeps the lane it last held and shrinks away there,
+       rather than snapping to nothing or sliding to row zero on the way out. */
+    for (const p of packedImgs.items) {
+      p.vis = easeVis(p.key, p.row >= 0 ? 1 : 0);
+      const rowTarget = p.row >= 0 ? p.row : (rowAnimRef.current.get(p.key) ?? 0);
+      p.rowF = easeRow(p.key, rowTarget);
+    }
+    const axisRaw = pinnedRaw.length
+      ? Math.max(axisMin, 20 + packedImgs.rows * imgRow + imgHang) : axisMin;
+    /* The axis glides too, so bands do not lurch when a picture comes or goes. */
+    const AXIS_Y = easePx("axis", axisRaw);
 
     const step = pickStep(140 * S * v.spp);
     const majors = majorTicks(step, tOf(-60), tOf(w + 60));
@@ -393,15 +441,7 @@ export default function TimelineApp() {
     let y = BAND_TOP - v.scrollY;
     let contentH = 0;
 
-    /* Frame-rate independent easing, so the flatten reads the same on a 60Hz
-       and a 144Hz screen. */
     const anim = eraAnimRef.current;
-    const nowMs = typeof performance !== "undefined" ? performance.now() : Date.now();
-    let dt = (nowMs - lastFrameRef.current) / 1000;
-    lastFrameRef.current = nowMs;
-    if (!(dt > 0) || dt > 0.25) dt = 1 / 60;      // first frame, or back from a stall
-    const ease = reduceMotionRef.current ? 1 : 1 - Math.exp(-dt / ERA_FADE);
-    let animating = false;
 
     for (const cat of doc.categories) {
       if (hidden.has(cat.id)) continue;
@@ -426,13 +466,8 @@ export default function TimelineApp() {
          its target outright — otherwise everything would fade in on load, and
          panning would fade in whatever crosses the edge. */
       for (const er of bucket.eras) {
-        const target = shownIds.has(er.id) ? 1 : 0;
-        const prev = anim.get(er.id);
-        if (prev === undefined || reduceMotionRef.current) { anim.set(er.id, target); continue; }
-        if (prev === target) continue;
-        let next = prev + (target - prev) * ease;
-        if (Math.abs(target - next) < 0.012) next = target; else animating = true;
-        anim.set(er.id, next);
+        seen.era.add(er.id);
+        ease(anim, er.id, shownIds.has(er.id) ? 1 : 0, kEra, 0.012);
       }
       const visOf = (er) => anim.get(er.id) ?? 0;
       /* Anything mid-flatten still draws, at the height and alpha it has left. */
@@ -460,9 +495,21 @@ export default function TimelineApp() {
         : clusterPoints(bucket.events, CLUSTER_GAP * S);
       const packedEvents = isCollapsed ? { items: [], rows: 0 }
         : packRows(singles, 12, prevRowsRef.current, 2);
-      const clusterRow = packedEvents.rows;          // clusters get their own row
-      const evRows = isCollapsed ? 0
-        : Math.max(1, packedEvents.rows + (clusters.length ? 1 : 0));
+
+      /* Rows are eased before the band is measured, not while it is drawn, so
+         the band's own height follows the events inside it. Zoom out and two
+         rows merge into one: the events glide together and the band closes up
+         around them in the same motion, instead of the band snapping shut
+         while its contents are still moving. */
+      let maxRowF = 0;
+      for (const it of packedEvents.items) {
+        it.rowF = easeRow(it.key, it.row);
+        if (it.rowF > maxRowF) maxRowF = it.rowF;
+      }
+      const clusterRow = clusters.length     // clusters get their own row
+        ? easeRow("clrow:" + cat.id, packedEvents.rows) : 0;
+      if (clusters.length && clusterRow > maxRowF) maxRowF = clusterRow;
+      const evRows = isCollapsed ? 0 : Math.max(1, maxRowF + 1);
 
       const stripTop = y + headerH;
       const stripH = stripAcc;
@@ -570,7 +617,7 @@ export default function TimelineApp() {
       /* 3e. events */
       for (const it of packedEvents.items) {
         newRows.set(it.key, it.row);
-        const rowTop = contentTop + it.row * rowH;
+        const rowTop = contentTop + it.rowF * rowH;
         const cy = rowTop + rowH * 0.66;
         if (cy < AXIS_Y + rulerPad || cy > h + 20) {
           if (it.id === selectedId) {
@@ -681,68 +728,94 @@ export default function TimelineApp() {
       const pcat = doc.categories.find((c) => c.id === p.it.cat);
       const color = p.it.color || (pcat ? pcat.color : cMuted);
 
-      /* Out of headroom. A bare dot read as "the picture is gone", so this is
-         drawn as a shrunken frame instead — clearly a collapsed picture, and
-         still clickable. */
-      if (p.row >= maxImgRows) {
-        if (p.x > -10 && p.x < w + 10) {
-          const mw = 14, mh = 11, mx = Math.round(p.x - mw / 2), my = AXIS_Y - 15;
-          ctx.globalAlpha = sel || hov ? 0.22 : 0.14;
-          ctx.fillStyle = color;
-          ctx.fillRect(mx, my, mw, mh);
-          ctx.globalAlpha = sel || hov ? 1 : 0.75;
-          ctx.strokeStyle = color;
-          ctx.strokeRect(mx + 0.5, my + 0.5, mw - 1, mh - 1);
-          ctx.beginPath();
-          ctx.moveTo(mx + 2.5, my + mh - 3.5);
-          ctx.lineTo(mx + 5.5, my + mh - 6.5);
-          ctx.lineTo(mx + 8.5, my + mh - 3.5);
-          ctx.stroke();
-          ctx.globalAlpha = 1;
-          hits.push({ item: p.it, isImage: true, x: p.x, y: AXIS_Y - 8,
-            x0: mx - 3, x1: mx + mw + 3, y0: my - 2, y1: AXIS_Y - 1 });
-        }
-        continue;
-      }
-      const blockBottom = AXIS_Y - imgHang - p.row * imgRow;
+      const s = p.vis;                       // 1 shown, 0 collapsed to a marker
+      const blockBottom = AXIS_Y - imgHang - p.rowF * imgRow;
       const imgBottom = blockBottom - capH;
       const top = imgBottom - imgH;
       const left = p.x - p.iw / 2;
-      if (left > w + 20 || left + p.iw < -20) continue;
+      const offScreen = left > w + 20 || left + p.iw < -20;
 
-      ctx.strokeStyle = color; ctx.globalAlpha = sel || hov ? 0.9 : 0.45;
-      ctx.beginPath();
-      ctx.moveTo(Math.round(p.x) + 0.5, blockBottom);
-      ctx.lineTo(Math.round(p.x) + 0.5, AXIS_Y);
-      ctx.stroke();
-      ctx.globalAlpha = 1;
+      /* The picture scales about the point it is tethered to, so losing a lane
+         reads as shrinking down onto the axis rather than blinking out. */
+      if (s > 0.02 && !offScreen) {
+        ctx.strokeStyle = color; ctx.globalAlpha = (sel || hov ? 0.9 : 0.45) * s;
+        ctx.beginPath();
+        ctx.moveTo(Math.round(p.x) + 0.5, blockBottom);
+        ctx.lineTo(Math.round(p.x) + 0.5, AXIS_Y);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
 
-      if (p.el) {
         ctx.save();
-        ctx.beginPath(); ctx.rect(left, top, p.iw, imgH); ctx.clip();
-        try { ctx.drawImage(p.el, left, top, p.iw, imgH); } catch (err) { /* not decodable */ }
+        ctx.translate(p.x, blockBottom);
+        ctx.scale(s, s);
+        ctx.translate(-p.x, -blockBottom);
+
+        if (p.el) {
+          ctx.save();
+          ctx.beginPath(); ctx.rect(left, top, p.iw, imgH); ctx.clip();
+          ctx.globalAlpha = s;
+          try { ctx.drawImage(p.el, left, top, p.iw, imgH); } catch (err) { /* not decodable */ }
+          ctx.restore();
+        } else {
+          ctx.globalAlpha = s;
+          ctx.fillStyle = cFaint;
+          ctx.fillRect(left, top, p.iw, imgH);
+        }
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = (sel || hov ? 1 : 0.55) * s;
+        ctx.lineWidth = sel || hov ? 2 : 1;
+        ctx.strokeRect(Math.round(left) + 0.5, Math.round(top) + 0.5, Math.round(p.iw) - 1, imgH - 1);
+        ctx.lineWidth = 1;
+
+        ctx.font = fT;
+        ctx.globalAlpha = s;
+        ctx.fillStyle = sel || hov ? cText : cMuted;
+        ctx.fillText(p.caption, p.x - p.capW / 2, blockBottom - 4 * S);
         ctx.restore();
-      } else {
-        ctx.fillStyle = cFaint;
-        ctx.fillRect(left, top, p.iw, imgH);
+        ctx.globalAlpha = 1;
       }
-      ctx.strokeStyle = color;
-      ctx.globalAlpha = sel || hov ? 1 : 0.55;
-      ctx.lineWidth = sel || hov ? 2 : 1;
-      ctx.strokeRect(Math.round(left) + 0.5, Math.round(top) + 0.5, Math.round(p.iw) - 1, imgH - 1);
-      ctx.lineWidth = 1; ctx.globalAlpha = 1;
 
-      ctx.font = fT;
-      ctx.fillStyle = sel || hov ? cText : cMuted;
-      ctx.fillText(p.caption, p.x - p.capW / 2, blockBottom - 4 * S);
+      /* What it shrinks into: a small frame, not a bare dot, which read as the
+         picture having been thrown away rather than folded up. */
+      const onAxis = p.x > -10 && p.x < w + 10;
+      if (s < 0.98 && onAxis) {
+        const mw = 14, mh = 11, mx = Math.round(p.x - mw / 2), my = AXIS_Y - 15;
+        const m = 1 - s;
+        ctx.globalAlpha = (sel || hov ? 0.22 : 0.14) * m;
+        ctx.fillStyle = color;
+        ctx.fillRect(mx, my, mw, mh);
+        ctx.globalAlpha = (sel || hov ? 1 : 0.75) * m;
+        ctx.strokeStyle = color;
+        ctx.strokeRect(mx + 0.5, my + 0.5, mw - 1, mh - 1);
+        ctx.beginPath();
+        ctx.moveTo(mx + 2.5, my + mh - 3.5);
+        ctx.lineTo(mx + 5.5, my + mh - 6.5);
+        ctx.lineTo(mx + 8.5, my + mh - 3.5);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
 
-      hits.push({ item: p.it, isImage: true, x: p.x, y: blockBottom + 4,
-        x0: Math.min(left, p.x - p.capW / 2), x1: Math.max(left + p.iw, p.x + p.capW / 2),
-        y0: top, y1: blockBottom });
+      /* Whichever of the two is the one you can actually see is the one you
+         can click. */
+      if (s > 0.5 && !offScreen) {
+        hits.push({ item: p.it, isImage: true, x: p.x, y: blockBottom + 4,
+          x0: Math.min(left, p.x - p.capW / 2), x1: Math.max(left + p.iw, p.x + p.capW / 2),
+          y0: top, y1: blockBottom });
+      } else if (onAxis) {
+        hits.push({ item: p.it, isImage: true, x: p.x, y: AXIS_Y - 8,
+          x0: p.x - 10, x1: p.x + 10, y0: AXIS_Y - 17, y1: AXIS_Y - 1 });
+      }
     }
 
     prevRowsRef.current = newRows;
     hitsRef.current = hits;
+
+    /* Forget anything this frame did not touch. Without this the maps grow
+       without bound, and an item scrolling back into view would slide in from
+       whatever position it happened to be left at. */
+    for (const k of rowAnimRef.current.keys()) if (!seen.row.has(k)) rowAnimRef.current.delete(k);
+    for (const k of visAnimRef.current.keys()) if (!seen.vis.has(k)) visAnimRef.current.delete(k);
+    for (const k of eraAnimRef.current.keys()) if (!seen.era.has(k)) eraAnimRef.current.delete(k);
 
     /* ---- 5. the ruler, on top of everything ---- */
     if (step.md > 1) {

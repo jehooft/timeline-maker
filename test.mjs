@@ -134,6 +134,99 @@ const rnd = (seed) => { let s = seed; return () => (s = (s*1103515245+12345) % 2
      (100*same/packed2.items.length).toFixed(0) + "% stable");
 }
 
+/* ---- 6a. lane packing for pinned pictures ----
+   The reported bug: an important picture reserved its whole row, so ordinary
+   pictures to its left were dropped with the space beside them plainly free.
+   Importance must buy nothing in layout, and only decide who keeps a lane once
+   the lanes are full. */
+{
+  const pic = (key, x0, x1, important = false) => ({ key, x0, x1, important });
+  const lanesOf = (res) => {
+    const m = {};
+    for (const it of res.items) (m[it.row] = m[it.row] || []).push(it.key);
+    return m;
+  };
+  const overlapFree = (res, gutter) => {
+    const rows = {};
+    for (const it of res.items) if (it.row >= 0) (rows[it.row] = rows[it.row] || []).push(it);
+    return Object.values(rows).every((lane) => {
+      const s = [...lane].sort((a, b) => a.x0 - b.x0);
+      for (let i = 1; i < s.length; i++) if (s[i].x0 < s[i - 1].x1 + gutter) return false;
+      return true;
+    });
+  };
+
+  /* the exact shape of the bug: a marked picture far to the right, a plain one
+     well clear of it on the left. They belong on the same row. */
+  {
+    const res = M.packLanes([pic("plain", 0, 100), pic("key", 800, 900, true)], 8, 3);
+    ok("a plain picture shares the row left of a marked one",
+       res.rows === 1 && res.items.every((i) => i.row === 0), JSON.stringify(lanesOf(res)));
+    ok("nothing is hidden when there is room", res.hidden.length === 0);
+  }
+  /* several plain ones, all clear of the marked one */
+  {
+    const items = [pic("k", 900, 1000, true), pic("a", 0, 100), pic("b", 150, 250), pic("c", 300, 400)];
+    const res = M.packLanes(items, 8, 3);
+    ok("a marked picture does not reserve the whole row", res.rows === 1, "rows=" + res.rows);
+    ok("and none of the plain ones are dropped", res.hidden.length === 0);
+  }
+  /* genuine overlap still separates them */
+  {
+    const res = M.packLanes([pic("k", 0, 100, true), pic("a", 50, 150)], 8, 3);
+    ok("overlapping pictures still take separate rows", res.rows === 2);
+    ok("lanes never overlap", overlapFree(res, 8));
+  }
+  /* when the lanes run out, the marked one is the one that stays */
+  {
+    const items = [pic("a", 0, 100), pic("b", 10, 110), pic("k", 20, 120, true)];
+    const res = M.packLanes(items, 8, 2);
+    ok("a full set drops exactly one", res.hidden.length === 1, JSON.stringify(res.hidden.map((i) => i.key)));
+    ok("and it is never the marked one", res.hidden[0].key !== "k");
+    ok("the marked one holds a lane", items.find((i) => i.key === "k").row >= 0);
+    ok("dropped pictures are flagged with row -1", res.hidden[0].row === -1);
+  }
+  /* two marked ones and one plain, room for two: the plain one goes */
+  {
+    const items = [pic("a", 0, 100), pic("k1", 10, 110, true), pic("k2", 20, 120, true)];
+    const res = M.packLanes(items, 8, 2);
+    ok("marked pictures outlast plain ones", res.hidden.length === 1 && res.hidden[0].key === "a");
+  }
+  /* with room for everyone, importance changes nothing at all */
+  {
+    const items = [pic("a", 0, 100), pic("b", 10, 110), pic("c", 20, 120)];
+    const plain = M.packLanes(items.map((i) => ({ ...i })), 8, 5);
+    const marked = M.packLanes(items.map((i) => ({ ...i, important: i.key === "c" })), 8, 5);
+    ok("layout is identical whether or not a picture is marked",
+       plain.rows === marked.rows && plain.rows === 3);
+  }
+  /* abutting exactly at the gutter */
+  {
+    const res = M.packLanes([pic("a", 0, 100), pic("b", 108, 200)], 8, 3);
+    ok("a picture exactly one gutter away shares the row", res.rows === 1);
+    const tight = M.packLanes([pic("a", 0, 100), pic("b", 107, 200)], 8, 3);
+    ok("one pixel closer does not", tight.rows === 2);
+  }
+  /* Packing carries no memory: a picture always drops to the lowest lane that
+     fits. This is what stops one stranding above an empty lane after the
+     pictures that crowded it have gone. */
+  {
+    const crowded = M.packLanes([pic("a", 0, 100), pic("b", 50, 150), pic("c", 100, 200)], 8, 3);
+    ok("crowded pictures stack", crowded.rows === 3);
+    const cleared = M.packLanes([pic("a", 0, 100), pic("b", 300, 400)], 8, 3);
+    ok("and drop straight back down once the crowd leaves",
+       cleared.rows === 1 && cleared.items.every((i) => i.row === 0));
+  }
+  /* the same input always packs the same way, so a redraw never reshuffles */
+  {
+    const build = () => [pic("k", 400, 500, true), pic("a", 0, 100), pic("b", 50, 150)];
+    const one = lanesOf(M.packLanes(build(), 8, 3));
+    const two = lanesOf(M.packLanes(build(), 8, 3));
+    ok("packing is deterministic", JSON.stringify(one) === JSON.stringify(two), JSON.stringify(one));
+  }
+  ok("no items is handled", M.packLanes([], 8, 3).rows === 0);
+}
+
 /* ---- 7. index + range query correctness (brute force comparison) ---- */
 {
   const doc = M.starterDoc();

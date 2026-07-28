@@ -146,9 +146,10 @@ export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickI
               <span>Important event</span>
             </label>
             <em className="hint">
-              Marked events keep a halo and their label, are never merged into a
-              cluster with ordinary events, and their pinned pictures win the
-              front row when space runs short.
+              Marked events keep a halo and their label, and are never merged
+              into a cluster with ordinary events. Their pinned pictures sit
+              wherever they fit like any other, but are the last to be folded
+              away when the room above the axis runs out.
             </em>
           </div>
         )}

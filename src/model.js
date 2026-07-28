@@ -202,6 +202,46 @@ export function queryRange(index, t0, t1) {
   return out;
 }
 
+/* --------------------------------------------- lane packing for pinned pictures
+
+   The event packer below walks items left to right and remembers only how far
+   right each row reaches, which is all that order needs. Pictures cannot use
+   it: vertical room is finite, so when the lanes fill up something has to be
+   dropped, and it should be an ordinary picture rather than an important one.
+   That means placing important pictures first — and the moment the pass stops
+   being left-to-right, a right-edge-only row is wrong. One important picture
+   at x=800 would reserve everything to its left, so every ordinary picture
+   before it fell out of the row with the space beside it plainly empty.
+
+   So a lane here keeps its members and a candidate is tested against all of
+   them. Going out of order then costs nothing in layout: an ordinary picture
+   still drops into any gap an important one leaves. Order decides only who is
+   left without a lane once the lanes run out.
+
+   A picture always takes the lowest lane it fits in, with no memory of where
+   it was. An earlier version kept the previous lane to stop rows reshuffling
+   while panning, but that is what left a picture stranded one lane up long
+   after the room below it had cleared. Movement between lanes is eased by the
+   caller instead, which buys the same calm without the staleness. */
+export function packLanes(items, gutter, maxRows) {
+  const byX = [...items].sort((a, b) => a.x0 - b.x0 || (a.key < b.key ? -1 : 1));
+  const lanes = [];
+  const clear = (lane, it) =>
+    !lane.some((o) => it.x0 < o.x1 + gutter && o.x0 < it.x1 + gutter);
+  const hidden = [];
+  const put = (it) => {
+    for (let r = 0; r < lanes.length; r++) {
+      if (clear(lanes[r], it)) { lanes[r].push(it); it.row = r; return; }
+    }
+    if (lanes.length < maxRows) { lanes.push([it]); it.row = lanes.length - 1; return; }
+    it.row = -1;
+    hidden.push(it);
+  };
+  for (const it of byX) if (it.important) put(it);
+  for (const it of byX) if (!it.important) put(it);
+  return { items: byX, rows: lanes.length, hidden };
+}
+
 /* ------------------------------------------------- row packing with hysteresis
    Items may carry `prio`. Because the pass is greedy — each item takes the
    first row it fits in — processing high-priority items first hands them the
