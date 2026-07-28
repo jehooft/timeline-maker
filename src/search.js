@@ -7,6 +7,10 @@
 
 const norm = (s) => (s || "").toLowerCase();
 
+/* Trivial and Unimportant rank below the pack rather than merely failing to
+   rank above it — the scale cuts both ways. Indexed by importance level. */
+const IMP_BONUS = [-14, -6, 0, 12, 20];
+
 function scoreOne(hay, needle) {
   if (!hay) return 0;
   const i = hay.indexOf(needle);
@@ -42,7 +46,7 @@ export function searchItems(index, doc, query, limit = 40) {
     }
     if (!matchedAll) continue;
     if (it.kind === "era") total += 8;          // eras are landmarks; surface them
-    if (it.important) total += 12;             // as are events the user marked
+    if (it.kind === "event") total += IMP_BONUS[it.imp ?? 2];
     out.push({ item: it, score: total });
   }
 

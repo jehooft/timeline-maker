@@ -66,6 +66,21 @@ export const MONTHS_LONG = ["January", "February", "March", "April", "May", "Jun
 
 export function nowT() { return BigInt(Math.floor(Date.now() / 1000)); }
 
+/* An ongoing span (an open era, or an event explicitly marked still running)
+   used to draw solid all the way to the edge of the screen, at any zoom — which
+   made a 30-year-old event look like it would run for the next several billion
+   years the moment you zoomed out far enough to see them on the same screen.
+   Instead it fades out past "now", over a stretch proportional to how long it
+   has already run: something that has lasted 30 years gets a 30-year taper,
+   something 500 million years old gets a proportionally deep one. A floor
+   keeps a thing that started yesterday from fading over a single pixel. */
+export const MIN_OPEN_FADE = 86400;   // seconds; floor on the fade, so "started today" still tapers
+export function openFadeEndT(t0, now = nowT()) {
+  const age = now > t0 ? Number(now - t0) : 0;
+  const fadeSec = Math.max(age, MIN_OPEN_FADE);
+  return now + toBig(Math.round(fadeSec));
+}
+
 /* Relative deep-time dates ("13.8 Gya") are anchored to a FIXED datum, not to
    the current clock. Anchoring to "now" made the same phrase resolve a little
    later on every keystroke, so re-saving an era nudged its end past the start

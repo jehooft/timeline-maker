@@ -140,7 +140,7 @@ const rnd = (seed) => { let s = seed; return () => (s = (s*1103515245+12345) % 2
    Importance must buy nothing in layout, and only decide who keeps a lane once
    the lanes are full. */
 {
-  const pic = (key, x0, x1, important = false) => ({ key, x0, x1, important });
+  const pic = (key, x0, x1, prio = 0) => ({ key, x0, x1, prio });
   const lanesOf = (res) => {
     const m = {};
     for (const it of res.items) (m[it.row] = m[it.row] || []).push(it.key);
@@ -159,27 +159,27 @@ const rnd = (seed) => { let s = seed; return () => (s = (s*1103515245+12345) % 2
   /* the exact shape of the bug: a marked picture far to the right, a plain one
      well clear of it on the left. They belong on the same row. */
   {
-    const res = M.packLanes([pic("plain", 0, 100), pic("key", 800, 900, true)], 8, 3);
+    const res = M.packLanes([pic("plain", 0, 100), pic("key", 800, 900, 1)], 8, 3);
     ok("a plain picture shares the row left of a marked one",
        res.rows === 1 && res.items.every((i) => i.row === 0), JSON.stringify(lanesOf(res)));
     ok("nothing is hidden when there is room", res.hidden.length === 0);
   }
   /* several plain ones, all clear of the marked one */
   {
-    const items = [pic("k", 900, 1000, true), pic("a", 0, 100), pic("b", 150, 250), pic("c", 300, 400)];
+    const items = [pic("k", 900, 1000, 1), pic("a", 0, 100), pic("b", 150, 250), pic("c", 300, 400)];
     const res = M.packLanes(items, 8, 3);
     ok("a marked picture does not reserve the whole row", res.rows === 1, "rows=" + res.rows);
     ok("and none of the plain ones are dropped", res.hidden.length === 0);
   }
   /* genuine overlap still separates them */
   {
-    const res = M.packLanes([pic("k", 0, 100, true), pic("a", 50, 150)], 8, 3);
+    const res = M.packLanes([pic("k", 0, 100, 1), pic("a", 50, 150)], 8, 3);
     ok("overlapping pictures still take separate rows", res.rows === 2);
     ok("lanes never overlap", overlapFree(res, 8));
   }
   /* when the lanes run out, the marked one is the one that stays */
   {
-    const items = [pic("a", 0, 100), pic("b", 10, 110), pic("k", 20, 120, true)];
+    const items = [pic("a", 0, 100), pic("b", 10, 110), pic("k", 20, 120, 1)];
     const res = M.packLanes(items, 8, 2);
     ok("a full set drops exactly one", res.hidden.length === 1, JSON.stringify(res.hidden.map((i) => i.key)));
     ok("and it is never the marked one", res.hidden[0].key !== "k");
@@ -188,7 +188,7 @@ const rnd = (seed) => { let s = seed; return () => (s = (s*1103515245+12345) % 2
   }
   /* two marked ones and one plain, room for two: the plain one goes */
   {
-    const items = [pic("a", 0, 100), pic("k1", 10, 110, true), pic("k2", 20, 120, true)];
+    const items = [pic("a", 0, 100), pic("k1", 10, 110, 1), pic("k2", 20, 120, 1)];
     const res = M.packLanes(items, 8, 2);
     ok("marked pictures outlast plain ones", res.hidden.length === 1 && res.hidden[0].key === "a");
   }
@@ -196,7 +196,7 @@ const rnd = (seed) => { let s = seed; return () => (s = (s*1103515245+12345) % 2
   {
     const items = [pic("a", 0, 100), pic("b", 10, 110), pic("c", 20, 120)];
     const plain = M.packLanes(items.map((i) => ({ ...i })), 8, 5);
-    const marked = M.packLanes(items.map((i) => ({ ...i, important: i.key === "c" })), 8, 5);
+    const marked = M.packLanes(items.map((i) => ({ ...i, prio: i.key === "c" ? 1 : 0 })), 8, 5);
     ok("layout is identical whether or not a picture is marked",
        plain.rows === marked.rows && plain.rows === 3);
   }
@@ -219,7 +219,7 @@ const rnd = (seed) => { let s = seed; return () => (s = (s*1103515245+12345) % 2
   }
   /* the same input always packs the same way, so a redraw never reshuffles */
   {
-    const build = () => [pic("k", 400, 500, true), pic("a", 0, 100), pic("b", 50, 150)];
+    const build = () => [pic("k", 400, 500, 1), pic("a", 0, 100), pic("b", 50, 150)];
     const one = lanesOf(M.packLanes(build(), 8, 3));
     const two = lanesOf(M.packLanes(build(), 8, 3));
     ok("packing is deterministic", JSON.stringify(one) === JSON.stringify(two), JSON.stringify(one));
@@ -452,6 +452,42 @@ const rnd = (seed) => { let s = seed; return () => (s = (s*1103515245+12345) % 2
   }
   ok("instants survive a delay between load and edit", drift.length === 0, drift.join(", "));
   ok("abutting eras still save after a delay", refused.length === 0, refused.join(", "));
+}
+
+/* ---- 12. the fade tail on an ongoing span ----
+   An open span used to draw solid to the edge of the screen regardless of
+   zoom, which made anything ongoing look like it would run for billions of
+   years the moment you zoomed out far enough to see it next to deep time. The
+   fade point is a real instant now, proportional to how long the thing has
+   already run, so it recedes properly as the view zooms out. */
+{
+  const now = M.tFromCivil(2026, 1, 1);
+  const oneDay = 86400n;
+
+  const life30yr = M.tFromCivil(1996, 1, 1);
+  const end30 = M.openFadeEndT(life30yr, now);
+  ok("a 30-year-old span fades roughly 30 years out",
+     Math.abs(Number(end30 - now) - Number(now - life30yr)) < 10,
+     String(Number(end30 - now)));
+
+  const yesterday = now - oneDay;
+  ok("something that started yesterday still gets a real fade, not a razor edge",
+     M.openFadeEndT(yesterday, now) - now >= BigInt(M.MIN_OPEN_FADE) - 1n);
+
+  const started_now = now;
+  ok("something starting this instant is floored, not zero",
+     M.openFadeEndT(started_now, now) - now === BigInt(M.MIN_OPEN_FADE));
+
+  const ancient = M.agoY(538.8e6);
+  const endAncient = M.openFadeEndT(ancient, now);
+  ok("an ancient span's fade is proportional too — deep, not infinite",
+     endAncient > now && endAncient < M.MAX_T,
+     String(endAncient));
+  ok("older spans get a longer fade than younger ones",
+     (endAncient - now) > (end30 - now));
+
+  ok("the same age always gives the same fade point, given the same 'now'",
+     M.openFadeEndT(life30yr, now) === M.openFadeEndT(life30yr, now));
 }
 
 console.log("\n" + pass + " passed, " + fail + " failed");

@@ -1,10 +1,12 @@
 /* Editor.jsx — the add/edit form. Parses dates as you type and enforces the
    era tree rules before it will let you save. */
 import React, { useState } from "react";
-import { parseDateInput, fmtInstant } from "../time.js";
+import { parseDateInput, fmtInstant, nowT } from "../time.js";
 import { SYMBOL_KEYS, SymbolChip } from "../symbols.jsx";
 import { IMAGE_MAX } from "../images.js";
-import { PALETTE, descendantsOf, siblingClash, escapesParent, containedSiblings } from "../model.js";
+import {
+  PALETTE, descendantsOf, siblingClash, escapesParent, containedSiblings, IMP, IMP_LEVELS,
+} from "../model.js";
 
 /* ----------------------------------------------------------------- the editor */
 export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickImage,
@@ -50,7 +52,13 @@ export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickI
     if (url) onLinkImage(url);
   };
 
-  const valid = draft.title.trim() && startParse && (endBlank || endParse) && order && !clash;
+  /* An era with a blank end has always meant open; an event needs the explicit
+     checkbox. Either way, a span with nothing to fade from — because it has not
+     even started yet — cannot be left permanently open. */
+  const wouldBeOngoing = endBlank && (isEra || !!draft.ongoing);
+  const futureOngoing = wouldBeOngoing && startParse && startParse.t > nowT();
+
+  const valid = draft.title.trim() && startParse && (endBlank || endParse) && order && !clash && !futureOngoing;
 
   return (
     <aside className="drawer" aria-label={draft.id ? "Edit item" : "New item"}>
@@ -104,12 +112,29 @@ export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickI
             placeholder={isEra ? "leave blank for ongoing" : "leave blank for a point in time"} />
           <em className={endBlank ? "hint" : endParse && order ? "hint ok" : "hint bad"}>
             {endBlank
-              ? isEra ? "Runs to the edge of the view" : "Shows as a single symbol"
+              ? isEra ? "Fades out into the future, rather than running forever"
+                : draft.ongoing ? "Fades out into the future, rather than running forever"
+                  : "Shows as a single symbol"
               : !endParse ? "Not a date I recognise"
                 : !order ? "End falls before start"
                   : "→ " + fmtInstant(endParse.t, endParse.precision) + "  (" + endParse.precision + ")"}
           </em>
         </label>
+
+        {!isEra && endBlank && (
+          <label className="check">
+            <input type="checkbox" checked={!!draft.ongoing}
+              onChange={(e) => onField("ongoing", e.target.checked)} />
+            <span>Ongoing — still happening</span>
+          </label>
+        )}
+
+        {futureOngoing && (
+          <p className="notice bad" style={{ marginTop: 10 }}>
+            This starts in the future, so it can't be left open-ended — give it an end date,
+            or move the start to the past.
+          </p>
+        )}
 
         {clash && adoptable && (
           <div className="notice warn">
@@ -139,17 +164,27 @@ export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickI
 
         {!isEra && (
           <div className="fld">
-            <span>Emphasis</span>
-            <label className="check">
-              <input type="checkbox" checked={!!draft.important}
-                onChange={(ev) => onField("important", ev.target.checked)} />
-              <span>Important event</span>
-            </label>
+            <span>Importance</span>
+            <div className="impgrid">
+              {IMP_LEVELS.map((lvl) => (
+                <button key={lvl.key} type="button"
+                  className={"impbtn imp-" + lvl.key + ((draft.imp ?? IMP.NORMAL) === lvl.v ? " on" : "")}
+                  onClick={() => onField("imp", lvl.v)} aria-pressed={(draft.imp ?? IMP.NORMAL) === lvl.v}>
+                  {lvl.label}
+                </button>
+              ))}
+            </div>
             <em className="hint">
-              Marked events keep a halo and their label, and are never merged
-              into a cluster with ordinary events. Their pinned pictures sit
-              wherever they fit like any other, but are the last to be folded
-              away when the room above the axis runs out.
+              {(draft.imp ?? IMP.NORMAL) === IMP.CRITICAL
+                ? "Two rings, never clusters even with other Critical events, and its pinned picture is the last thing folded away."
+                : (draft.imp ?? IMP.NORMAL) === IMP.IMPORTANT
+                  ? "A halo and its label always show, and it clusters only with other Important events."
+                  : (draft.imp ?? IMP.NORMAL) === IMP.UNIMPORTANT
+                    ? "Drawn a little smaller; its label hides when a stronger event sits close by."
+                    : (draft.imp ?? IMP.NORMAL) === IMP.TRIVIAL
+                      ? "Small, and its title never shows on the timeline — only in this card, on click."
+                      : "The default weight and behaviour."}
+              {" "}Events only cluster with others of the same importance.
             </em>
           </div>
         )}

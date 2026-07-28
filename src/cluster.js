@@ -7,22 +7,27 @@
 
    Spans and eras are never clustered — they are the landmarks you navigate by,
    and their extent is still meaningful when their start is not. */
+import { IMP } from "./model.js";
 
 export const CLUSTER_GAP = 14;      // px between symbol centres before merging
 
-/* Important events are never folded in with ordinary ones: the whole point of
-   marking an event is that it stays findable when everything around it has
-   collapsed. They still merge with each other, so a dense run of important
-   events cannot open a thousand rows either. */
+/* Events only cluster with events of the same importance level: a point that
+   matters is never hidden inside a pile of ones that don't, and — as
+   important as that sounds — bundling a Critical event in with Normal ones
+   would bury it just the same. Critical goes one step further and never
+   clusters at all, even with other Critical events, matching how the mark is
+   meant to work: always its own, findable thing on the timeline. */
 export function clusterPoints(items, gap = CLUSTER_GAP) {
-  const others = [], plain = [], keyed = [];
+  const others = [];
+  const byLevel = new Map();
   for (const it of items) {
-    if (it.isSpan) others.push(it);
-    else if (it.important) keyed.push(it);
-    else plain.push(it);
+    const lvl = it.imp ?? IMP.NORMAL;
+    if (it.isSpan || lvl === IMP.CRITICAL) { others.push(it); continue; }
+    if (!byLevel.has(lvl)) byLevel.set(lvl, []);
+    byLevel.get(lvl).push(it);
   }
   const singles = [...others], clusters = [];
-  for (const group of [plain, keyed]) clusterGroup(group, gap, singles, clusters);
+  for (const group of byLevel.values()) clusterGroup(group, gap, singles, clusters);
   return { singles, clusters };
 }
 
@@ -34,7 +39,7 @@ function clusterGroup(points, gap, singles, clusters) {
   let run = [points[0]];
   const flush = () => {
     if (run.length === 1) { singles.push(run[0]); return; }
-    const important = run[0].important;
+    const imp = run[0].imp ?? IMP.NORMAL;    // uniform within a run: same-level grouping guarantees it
     let lo = run[0], hi = run[0];
     for (const p of run) {
       if (p.t0 < lo.t0) lo = p;
@@ -55,7 +60,7 @@ function clusterGroup(points, gap, singles, clusters) {
     const x = (run[0].x1p + run[run.length - 1].x1p) / 2;
     clusters.push({
       key: "cl:" + run[0].key + ":" + run.length,
-      isCluster: true, important, members: run, count: run.length, minGap,
+      isCluster: true, imp, members: run, count: run.length, minGap,
       cat: run[0].cat, x1p: x, x2p: x, t0: lo.t0, t1: hi.t0,
       x0: x - 13, x1: x + 13,
     });

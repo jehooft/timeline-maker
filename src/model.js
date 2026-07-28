@@ -14,6 +14,21 @@ export const agoY = (y) => fromYearsAgo(y, y >= 1e9 ? "gyr" : y >= 1e6 ? "myr" :
 export const PALETTE = ["#4E92C8", "#A184C4", "#5FA97C", "#E0A64B", "#C46A5A", "#57A8A8",
   "#C08A4A", "#8FA85C", "#D3799C", "#7F8BA8"];
 
+/* Importance is a five-step scale rather than a flag, so an event can outrank
+   the ordinary run without being lumped in with the handful that matter most.
+   Each step overrules everything below it — for clustering, for which picture
+   keeps its lane when room runs out — and Normal is silently the default, the
+   same way an event with no colour just takes its category's. */
+export const IMP = { TRIVIAL: 0, UNIMPORTANT: 1, NORMAL: 2, IMPORTANT: 3, CRITICAL: 4 };
+export const IMP_LEVELS = [
+  { v: IMP.TRIVIAL, key: "trivial", label: "Trivial" },
+  { v: IMP.UNIMPORTANT, key: "unimportant", label: "Unimportant" },
+  { v: IMP.NORMAL, key: "normal", label: "Normal" },
+  { v: IMP.IMPORTANT, key: "important", label: "Important" },
+  { v: IMP.CRITICAL, key: "critical", label: "Critical" },
+];
+export const impOf = (it) => (typeof it.imp === "number" ? it.imp : IMP.NORMAL);
+
 /* Eras form a tree per category. Siblings must not overlap; a child sits inside
    its parent. Depth becomes a row in the band's era strip, and every era tints
    the band background beneath it. */
@@ -60,7 +75,7 @@ export function starterDoc() {
       { id: "e1", cat: "vg", title: "Pong released", sym: "square", start: D(tFromCivil(1972, 11, 29), "day"), end: null, desc: "Atari's coin-op table tennis game reaches arcades and effectively starts the commercial industry.", tags: ["atari", "arcade"] },
       { id: "e2", cat: "vg", title: "Space Invaders", sym: "triangle", start: D(tFromCivil(1978, 6, 1), "month"), end: null, desc: "Taito's shooter causes a nationwide surge in arcade play in Japan.", tags: ["taito"] },
       { id: "e3", cat: "vg", title: "Pac-Man", sym: "dot", start: D(tFromCivil(1980, 5, 22), "day"), end: null, desc: "Namco's maze chase becomes the highest-grossing arcade game of its era.", tags: ["namco"] },
-      { important: true, id: "e4", cat: "vg", title: "Donkey Kong released", sym: "star", color: "#E0A64B", start: D(tFromCivil(1981, 7, 9), "day"), end: null, desc: "Nintendo's arcade hit, designed by Shigeru Miyamoto, introduces both Donkey Kong and the character who becomes Mario.", tags: ["nintendo", "arcade"] },
+      { imp: IMP.IMPORTANT, id: "e4", cat: "vg", title: "Donkey Kong released", sym: "star", color: "#E0A64B", start: D(tFromCivil(1981, 7, 9), "day"), end: null, desc: "Nintendo's arcade hit, designed by Shigeru Miyamoto, introduces both Donkey Kong and the character who becomes Mario.", tags: ["nintendo", "arcade"] },
       { id: "e5", cat: "vg", title: "Development of the Famicom", sym: "ring", start: D(tFromCivil(1981, 1, 1), "month"), end: D(tFromCivil(1983, 7, 15), "day"), desc: "Roughly two and a half years from initial concept to Japanese launch.", tags: ["nintendo"] },
       { id: "e6", cat: "vg", title: "NES launches in North America", sym: "flag", start: D(tFromCivil(1985, 10, 18), "day"), end: null, desc: "A limited New York test launch, following the 1983 crash in the American market.", tags: ["nintendo"] },
       { id: "e7", cat: "vg", title: "Game Boy", sym: "square", start: D(tFromCivil(1989, 4, 21), "day"), end: null, desc: "Handheld play goes mainstream on four AA batteries and a monochrome screen.", tags: ["nintendo"] },
@@ -73,16 +88,16 @@ export function starterDoc() {
       { id: "h2", cat: "hist", title: "Roman Empire", sym: "flag", start: D(tFromCivil(-26, 1, 16), "day"), end: D(tFromCivil(476, 9, 4), "day"), desc: "From Octavian receiving the title Augustus to the deposition of Romulus Augustulus in the west.", tags: ["rome"] },
       { id: "h3", cat: "hist", title: "Printing press in Europe", sym: "square", start: D(tFromCivil(1440, 1, 1), "year"), end: null, desc: "Gutenberg's movable-type press. The date is conventional rather than documented.", tags: ["technology"] },
       { id: "h4", cat: "hist", title: "Industrial Revolution", sym: "hex", start: D(tFromCivil(1760, 1, 1), "year"), end: D(tFromCivil(1840, 1, 1), "year"), desc: "Conventional dating for the first phase, centred on Britain.", tags: ["technology"] },
-      { important: true, id: "h5", cat: "hist", title: "Apollo 11 lunar landing", sym: "star", color: "#E0A64B", start: D(tFromCivil(1969, 7, 20, 20, 17, 40), "second"), end: null, desc: "Touchdown in the Sea of Tranquillity. Stored to the second — zoom all the way in and the marker stays exactly here.", tags: ["space"] },
+      { imp: IMP.IMPORTANT, id: "h5", cat: "hist", title: "Apollo 11 lunar landing", sym: "star", color: "#E0A64B", start: D(tFromCivil(1969, 7, 20, 20, 17, 40), "second"), end: null, desc: "Touchdown in the Sea of Tranquillity. Stored to the second — zoom all the way in and the marker stays exactly here.", tags: ["space"] },
       { id: "h6", cat: "hist", title: "First ARPANET message", sym: "bolt", start: D(tFromCivil(1969, 10, 29, 22, 30, 0), "minute"), end: null, desc: "Two letters transmitted from UCLA to Stanford before the system crashed.", tags: ["networks"] },
       { id: "h7", cat: "hist", title: "World Wide Web proposal", sym: "ring", start: D(tFromCivil(1989, 3, 12), "day"), end: null, desc: "Tim Berners-Lee circulates his information management proposal at CERN.", tags: ["networks"] },
       { id: "h8", cat: "hist", title: "Fall of the Berlin Wall", sym: "cross", start: D(tFromCivil(1989, 11, 9), "day"), end: null, desc: "Border crossings open after an announcement at an evening press conference.", tags: ["politics"] },
       { id: "d1", cat: "earth", title: "Formation of Earth", sym: "dot", start: D(agoY(4.54e9), "gyr"), end: null, desc: "Accretion from the solar nebula, dated by radiometric analysis of meteorites.", tags: ["geology"] },
       { id: "d2", cat: "earth", title: "Earliest evidence of life", sym: "ring", start: D(agoY(3.7e9), "gyr"), end: null, desc: "Isotopic and structural evidence from Greenland metasedimentary rocks. Contested.", tags: ["biology"] },
       { id: "d3", cat: "earth", title: "Great Oxidation Event", sym: "hex", start: D(agoY(2.4e9), "gyr"), end: D(agoY(2.0e9), "gyr"), desc: "Free oxygen accumulates in the atmosphere following the rise of cyanobacteria.", tags: ["atmosphere"] },
-      { important: true, id: "d4", cat: "earth", title: "Cambrian explosion", sym: "bolt", start: D(agoY(538.8e6), "myr"), end: null, desc: "Rapid diversification of most major animal phyla in the fossil record.", tags: ["evolution"] },
+      { imp: IMP.IMPORTANT, id: "d4", cat: "earth", title: "Cambrian explosion", sym: "bolt", start: D(agoY(538.8e6), "myr"), end: null, desc: "Rapid diversification of most major animal phyla in the fossil record.", tags: ["evolution"] },
       { id: "d5", cat: "earth", title: "Age of the dinosaurs", sym: "triangle", color: "#C08A4A", start: D(agoY(233e6), "myr"), end: D(agoY(66e6), "myr"), desc: "From the earliest known dinosaurs in the Carnian to the end-Cretaceous extinction.", tags: ["evolution"] },
-      { important: true, id: "d6", cat: "earth", title: "K–Pg extinction", sym: "cross", color: "#C46A5A", start: D(agoY(66e6), "myr"), end: null, desc: "The Chicxulub impact and its aftermath end roughly three quarters of species.", tags: ["extinction"] },
+      { imp: IMP.CRITICAL, id: "d6", cat: "earth", title: "K–Pg extinction", sym: "cross", color: "#C46A5A", start: D(agoY(66e6), "myr"), end: null, desc: "The Chicxulub impact and its aftermath end roughly three quarters of species.", tags: ["extinction"] },
       { id: "d7", cat: "earth", title: "Homo sapiens appears", sym: "pin", start: D(agoY(300e3), "kyr"), end: null, desc: "Earliest known fossils, from Jebel Irhoud in Morocco.", tags: ["humans"] },
       { id: "d8", cat: "earth", title: "Last glacial period", sym: "diamond", start: D(agoY(115e3), "kyr"), end: D(agoY(11.7e3), "kyr"), desc: "The most recent glacial, ending with the transition into the Holocene.", tags: ["climate"] },
     ],
@@ -170,7 +185,13 @@ export function buildIndex(doc) {
   const byId = new Map(doc.eras.map((r) => [r.id, r]));
   const items = [];
   for (const e of doc.events) {
-    items.push({ ...e, kind: "event", t0: e.start.t, t1: e.end ? e.end.t : e.start.t, isSpan: !!e.end });
+    /* An event is a point unless it has an end, or is explicitly marked as
+       still running — "ongoing" is what lets a span exist with only a start,
+       the same freedom eras already had. */
+    const open = !e.end && !!e.ongoing;
+    const isSpan = !!e.end || open;
+    items.push({ ...e, imp: impOf(e), kind: "event", t0: e.start.t,
+      t1: e.end ? e.end.t : (open ? MAX_T : e.start.t), isSpan, open });
   }
   for (const r of doc.eras) {
     items.push({ ...r, kind: "era", depth: eraDepth(r, byId), t0: eraStart(r), t1: eraEnd(r), open: !r.end, isSpan: true });
@@ -207,16 +228,18 @@ export function queryRange(index, t0, t1) {
    The event packer below walks items left to right and remembers only how far
    right each row reaches, which is all that order needs. Pictures cannot use
    it: vertical room is finite, so when the lanes fill up something has to be
-   dropped, and it should be an ordinary picture rather than an important one.
-   That means placing important pictures first — and the moment the pass stops
-   being left-to-right, a right-edge-only row is wrong. One important picture
-   at x=800 would reserve everything to its left, so every ordinary picture
-   before it fell out of the row with the space beside it plainly empty.
+   dropped, and it should be the least important picture first. That means
+   placing higher-priority pictures first — and the moment the pass stops being
+   left-to-right, a right-edge-only row is wrong. One high-priority picture at
+   x=800 would reserve everything to its left, so every ordinary picture before
+   it fell out of the row with the space beside it plainly empty.
 
    So a lane here keeps its members and a candidate is tested against all of
-   them. Going out of order then costs nothing in layout: an ordinary picture
-   still drops into any gap an important one leaves. Order decides only who is
-   left without a lane once the lanes run out.
+   them. Going out of order then costs nothing in layout: a lower-priority
+   picture still drops into any gap a higher one leaves. Priority decides only
+   who is left without a lane once the lanes run out — and because it is a
+   number rather than a flag, "Critical outranks Important outranks Normal..."
+   falls out for free, without this file knowing what the numbers mean.
 
    A picture always takes the lowest lane it fits in, with no memory of where
    it was. An earlier version kept the previous lane to stop rows reshuffling
@@ -237,8 +260,8 @@ export function packLanes(items, gutter, maxRows) {
     it.row = -1;
     hidden.push(it);
   };
-  for (const it of byX) if (it.important) put(it);
-  for (const it of byX) if (!it.important) put(it);
+  const levels = [...new Set(byX.map((it) => it.prio || 0))].sort((a, b) => b - a);
+  for (const lvl of levels) for (const it of byX) if ((it.prio || 0) === lvl) put(it);
   return { items: byX, rows: lanes.length, hidden };
 }
 

@@ -132,10 +132,15 @@ const doc = { ...starterDoc(), id: "tl_1", createdAt: "2026-01-01T00:00:00Z" };
      fmtInstant(res.eras[0].start.t, "year"));
   ok("reads deep time", res.events.find(e => e.title === "Deep one").start.precision === "myr");
   ok("splits tags", res.events.find(e => e.title === "Fall of Rome").tags.join() === "rome,politics");
-  ok("reads the important column", (() => {
+  ok("reads the legacy important column as Important", (() => {
     const r2 = importCSV("title,start,important\nA,1990,true\nB,1991,\n",
       { categories: [], events: [], eras: [] });
-    return r2.events[0].important === true && !r2.events[1].important;
+    return r2.events[0].imp === 3 && r2.events[1].imp === undefined;
+  })());
+  ok("reads the importance column", (() => {
+    const r3 = importCSV("title,start,importance\nA,1990,critical\nB,1991,trivial\nC,1992,normal\n",
+      { categories: [], events: [], eras: [] });
+    return r3.events[0].imp === 4 && r3.events[1].imp === 0 && r3.events[2].imp === undefined;
   })());
   ok("keeps a blank end as a point", res.events.find(e => e.title === "Fall of Rome").end === null);
   ok("keeps a filled end as a span", res.events.find(e => e.title === "A span").end !== null);
@@ -231,6 +236,63 @@ const doc = { ...starterDoc(), id: "tl_1", createdAt: "2026-01-01T00:00:00Z" };
   const noImg = importCSV("title,start,pin_image\nA,1990,true\n",
     { categories: [], events: [], eras: [] });
   ok("a pin with nothing to pin is ignored", !noImg.events[0].pinImage);
+}
+
+/* ---- 9. ongoing spans through CSV ----
+   "ongoing" is a literal token for the end column, not a date — it marks an
+   event span as still running, the freedom eras already had from a blank end. */
+{
+  const csv = "title,start,end\nStill going,1990,ongoing\nDone,1990,2000\nPoint,1990,\n";
+  const res = importCSV(csv, { categories: [], events: [], eras: [] });
+  ok("no import errors", res.errors.length === 0, res.errors.join(" | "));
+  const going = res.events.find((e) => e.title === "Still going");
+  ok("marks the event ongoing", going.ongoing === true);
+  ok("and leaves it with no end", going.end === null);
+  const done = res.events.find((e) => e.title === "Done");
+  ok("a real end date is not treated as the token", done.ongoing === undefined && done.end !== null);
+  const point = res.events.find((e) => e.title === "Point");
+  ok("a blank end is still just a point", point.ongoing === undefined && point.end === null);
+
+  /* a future start cannot be ongoing */
+  const future = importCSV("title,start,end\nNot yet,2999,ongoing\n",
+    { categories: [], events: [], eras: [] });
+  ok("a future ongoing event is refused", future.events.length === 0 && future.errors.length === 1,
+     JSON.stringify(future.errors));
+  const futureEra = importCSV("type,title,start,end\nera,Not yet,2999,\n",
+    { categories: [], events: [], eras: [] });
+  ok("a future open era is refused the same way",
+     futureEra.eras.length === 0 && futureEra.errors.length === 1);
+
+  /* round trip: export must write "ongoing", not leave it blank */
+  const doc2 = { ...starterDoc(), id: "tl_og", createdAt: "2026-01-01T00:00:00Z" };
+  doc2.events = [{ ...doc2.events[0], end: null, ongoing: true }];
+  const out = exportCSV(doc2);
+  const eventLine = out.split("\n").find((l) => l.startsWith("event,"));
+  ok("export writes the literal token", /,ongoing,/.test(eventLine), eventLine);
+  const back = importCSV(out, { categories: [], events: [], eras: [] });
+  ok("and it survives the round trip", back.events[0].ongoing === true && back.events[0].end === null);
+}
+
+/* ---- 10. importance survives JSON, including the legacy migration ---- */
+{
+  const doc3 = { ...starterDoc(), id: "tl_imp", createdAt: "2026-01-01T00:00:00Z" };
+  doc3.events = [{ ...doc3.events[0], imp: 4 }, { ...doc3.events[1] }];
+  const back = decodeDoc(JSON.parse(JSON.stringify(encodeDoc(doc3))));
+  ok("an explicit level round-trips", back.events[0].imp === 4);
+  ok("no level at all stays absent, not defaulted", back.events[1].imp === undefined);
+
+  /* a save from before the five-level scale existed */
+  const legacy = { format: "timeline-doc", version: 1, id: "tl_old", categories: [],
+    eras: [], events: [
+      { id: "e1", start: { t: "0", precision: "second" }, end: null, important: true },
+      { id: "e2", start: { t: "0", precision: "second" }, end: null, important: false },
+      { id: "e3", start: { t: "0", precision: "second" }, end: null },
+    ] };
+  const migrated = decodeDoc(legacy);
+  ok("important:true becomes Important", migrated.events[0].imp === 3);
+  ok("important:false becomes unset (Normal by default)", migrated.events[1].imp === undefined);
+  ok("no flag at all stays unset too", migrated.events[2].imp === undefined);
+  ok("the legacy field itself is gone", !("important" in migrated.events[0]));
 }
 
 console.log("\n" + pass + " passed, " + fail + " failed");

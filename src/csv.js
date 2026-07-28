@@ -5,13 +5,16 @@
    place to draft a timeline. Pictures cannot ride along in CSV; JSON is the
    lossless format. */
 
-import { parseDateInput, instantToInput } from "./time.js";
-import { uid, PALETTE } from "./model.js";
+import { parseDateInput, instantToInput, nowT } from "./time.js";
+import { uid, PALETTE, IMP, IMP_LEVELS } from "./model.js";
 import { externalImage } from "./images.js";
 
 export const CSV_COLUMNS = ["type", "title", "start", "end", "category", "parent",
-  "symbol", "color", "description", "image", "pin_image", "important", "precision",
+  "symbol", "color", "description", "image", "pin_image", "importance", "precision",
   "link", "tags", "id"];
+
+const IMP_BY_KEY = new Map(IMP_LEVELS.map((l) => [l.key, l.v]));
+const impKeyOf = (imp) => (IMP_LEVELS.find((l) => l.v === (imp ?? IMP.NORMAL)) || IMP_LEVELS[2]).key;
 
 /* ------------------------------------------------------------------ reading */
 
@@ -71,12 +74,25 @@ export function importCSV(text, doc) {
     const start = parseDateInput(startRaw);
     if (!start) { errors.push('Row ' + line + ': cannot read the start date "' + startRaw + '"'); return; }
 
+    const isEra = col(r, "type").toLowerCase() === "era";
+
+    /* "ongoing" is a literal token, not a date: for an era it is just another
+       way of writing a blank end (which already means open); for an event it
+       is what marks a span as still running rather than a fixed-length one. */
     const endRaw = col(r, "end");
-    let end = null;
+    let end = null, ongoing = false;
     if (endRaw) {
-      end = parseDateInput(endRaw);
-      if (!end) { errors.push('Row ' + line + ': cannot read the end date "' + endRaw + '"'); return; }
-      if (end.t < start.t) { errors.push("Row " + line + ": the end falls before the start"); return; }
+      if (endRaw.trim().toLowerCase() === "ongoing") {
+        ongoing = true;
+      } else {
+        end = parseDateInput(endRaw);
+        if (!end) { errors.push('Row ' + line + ': cannot read the end date "' + endRaw + '"'); return; }
+        if (end.t < start.t) { errors.push("Row " + line + ": the end falls before the start"); return; }
+      }
+    }
+    if (!end && (isEra || ongoing) && start.t > nowT()) {
+      errors.push("Row " + line + ": starts in the future, so it can't be ongoing — give it an end date");
+      return;
     }
 
     const precOverride = col(r, "precision").toLowerCase();
@@ -93,7 +109,6 @@ export function importCSV(text, doc) {
       byName.set(catName.toLowerCase(), cat);
     }
 
-    const isEra = col(r, "type").toLowerCase() === "era";
     const item = {
       id: col(r, "id") || uid(isEra ? "r" : "e"),
       cat: cat.id, title, start, end,
@@ -132,7 +147,14 @@ export function importCSV(text, doc) {
       eras.push(item);
     } else {
       item.sym = col(r, "symbol") || "dot";
-      if (truthy(col(r, "important"))) item.important = true;
+      if (ongoing) item.ongoing = true;
+      const impRaw = col(r, "importance").toLowerCase();
+      if (impRaw && IMP_BY_KEY.has(impRaw)) {
+        const imp = IMP_BY_KEY.get(impRaw);
+        if (imp !== IMP.NORMAL) item.imp = imp;
+      } else if (truthy(col(r, "important"))) {
+        item.imp = IMP.IMPORTANT;    // legacy column, from before the five-level scale
+      }
       events.push(item);
     }
   });
@@ -175,7 +197,9 @@ export function exportCSV(doc) {
     type,
     it.title,
     instantToInput(it.start.t, it.start.precision),
-    it.end ? instantToInput(it.end.t, it.end.precision) : "",
+    /* "ongoing" round-trips an open event span; an open era already round-trips
+       as blank, since blank has meant "open" for eras from the start. */
+    it.end ? instantToInput(it.end.t, it.end.precision) : (type === "event" && it.ongoing ? "ongoing" : ""),
     catName.get(it.cat) || "",
     type === "era" && it.parent ? eraTitle.get(it.parent) || "" : "",
     type === "event" ? it.sym || "dot" : "",
@@ -183,7 +207,7 @@ export function exportCSV(doc) {
     it.desc || "",
     linkedImageURL(doc, it),
     it.pinImage ? "true" : "",
-    type === "event" && it.important ? "true" : "",
+    type === "event" ? impKeyOf(it.imp) : "",
     it.start.precision,
     (it.links || []).join("; "),
     (it.tags || []).join("; "),

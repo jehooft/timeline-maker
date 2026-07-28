@@ -152,39 +152,58 @@ const ok = (n, c, x = "") => { if (c) pass++; else { fail++; console.log("  FAIL
      clusterPoints([at(0, 0, 500), at(1, 1, 500), at(2, 2, 700)]).clusters[0].minGap === 200);
 }
 
-/* ---- important events ---- */
+/* ---- importance and clustering ----
+   Events only cluster with events of the same importance level, and Critical
+   never clusters at all — even with other Critical events. */
 {
-  const mk = (i, x, imp) => ({
+  const TRIVIAL = 0, UNIMPORTANT = 1, NORMAL = 2, IMPORTANT = 3, CRITICAL = 4;
+  const mk = (i, x, imp = NORMAL) => ({
     key: "k" + i, id: "k" + i, x1p: x, x2p: x,
-    t0: BigInt(i * 1000), t1: BigInt(i * 1000), isSpan: false, important: !!imp, cat: "c",
+    t0: BigInt(i * 1000), t1: BigInt(i * 1000), isSpan: false, imp, cat: "c",
   });
 
-  /* the core rule: never merged with ordinary events */
-  const mixed = [mk(1, 0), mk(2, 2), mk(3, 4, true), mk(4, 6), mk(5, 8, true)];
+  /* the core rule: never merged with a different level */
+  const mixed = [mk(1, 0), mk(2, 2), mk(3, 4, IMPORTANT), mk(4, 6), mk(5, 8, IMPORTANT)];
   const r = clusterPoints(mixed);
   for (const cl of r.clusters) {
-    ok("a cluster is all-important or all-ordinary",
-       cl.members.every((m) => !!m.important === !!cl.members[0].important),
-       cl.members.map((m) => m.important).join(","));
+    ok("a cluster is uniformly one importance level",
+       cl.members.every((m) => m.imp === cl.members[0].imp),
+       cl.members.map((m) => m.imp).join(","));
   }
-  const marked = r.clusters.filter((c) => c.important);
-  ok("important events cluster only with each other",
-     marked.every((c) => c.members.every((m) => m.important)));
-  ok("the plain ones still cluster", r.clusters.some((c) => !c.important));
+  const marked = r.clusters.filter((c) => c.imp === IMPORTANT);
+  ok("Important events cluster only with each other",
+     marked.every((c) => c.members.every((m) => m.imp === IMPORTANT)));
+  ok("the Normal ones still cluster", r.clusters.some((c) => c.imp === NORMAL));
   ok("nothing is lost when mixed",
      r.singles.length + r.clusters.reduce((n, c) => n + c.count, 0) === mixed.length);
 
-  /* a lone important event among a pile stays a single */
-  const pile = [...Array.from({ length: 20 }, (_, i) => mk(i, i * 0.3)), mk(99, 3, true)];
+  /* a lone Important event among a Normal pile stays a single */
+  const pile = [...Array.from({ length: 20 }, (_, i) => mk(i, i * 0.3)), mk(99, 3, IMPORTANT)];
   const p2 = clusterPoints(pile);
-  ok("a lone important event is never absorbed",
+  ok("a lone Important event is never absorbed into a Normal pile",
      p2.singles.some((s) => s.id === "k99"), p2.singles.map((s) => s.id).join(","));
 
-  /* dense important events still merge with each other, so rows stay bounded */
-  const many = Array.from({ length: 30 }, (_, i) => mk(i, i * 0.2, true));
+  /* dense Important events still merge with each other, so rows stay bounded */
+  const many = Array.from({ length: 30 }, (_, i) => mk(i, i * 0.2, IMPORTANT));
   const m3 = clusterPoints(many);
-  ok("dense important events still merge", m3.clusters.length === 1 && m3.clusters[0].count === 30);
-  ok("and the merged marker is flagged important", m3.clusters[0].important === true);
+  ok("dense Important events still merge", m3.clusters.length === 1 && m3.clusters[0].count === 30);
+  ok("and the merged marker is flagged Important", m3.clusters[0].imp === IMPORTANT);
+
+  /* Critical is the exception: it never clusters, not even with itself */
+  const crits = Array.from({ length: 12 }, (_, i) => mk(i, i * 0.2, CRITICAL));
+  const c1 = clusterPoints(crits);
+  ok("dense Critical events never merge", c1.clusters.length === 0 && c1.singles.length === 12);
+
+  /* every one of the five levels stays with its own kind */
+  const allLevels = [
+    ...Array.from({ length: 6 }, (_, i) => mk(i, i * 0.2, TRIVIAL)),
+    ...Array.from({ length: 6 }, (_, i) => mk(100 + i, 20 + i * 0.2, UNIMPORTANT)),
+    ...Array.from({ length: 6 }, (_, i) => mk(200 + i, 40 + i * 0.2, NORMAL)),
+    ...Array.from({ length: 6 }, (_, i) => mk(300 + i, 60 + i * 0.2, IMPORTANT)),
+  ];
+  const c2 = clusterPoints(allLevels);
+  ok("four separate levels give four separate clusters", c2.clusters.length === 4,
+     c2.clusters.map((c) => c.imp + ":" + c.count).join(" "));
 }
 
 console.log("\n" + pass + " passed, " + fail + " failed");

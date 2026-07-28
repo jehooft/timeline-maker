@@ -121,6 +121,7 @@ export const STYLES = `
         .era-mark { width: 12px; height: 5px; border-radius: 1px; flex: none; opacity: .8; }
         .item-title { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .item-title.key { color: var(--text); font-weight: 600; }
+        .item-title.dim { opacity: .55; }
         .item-star { color: var(--accent); font-size: 9px; line-height: 1; flex: none; }
         .item-date { margin-left: auto; font: 9px ui-monospace, monospace; color: var(--muted);
                      flex: none; padding-left: 6px; }
@@ -161,6 +162,13 @@ export const STYLES = `
         .notice.bad { border-color: var(--danger); color: #E39A90; background: rgba(196,102,90,.09); }
         .notice.warn { border-color: #8A7440; color: #D6BC84; background: rgba(217,164,65,.07); }
 
+        .impgrid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
+        .impbtn { background: var(--ink); border: 1px solid var(--rule); border-radius: 3px;
+                  color: var(--muted); font: 9px/1.2 ui-monospace, monospace; letter-spacing: .03em;
+                  padding: 7px 2px; cursor: pointer; text-align: center; }
+        .impbtn:hover { border-color: var(--muted); color: var(--text); }
+        .impbtn.on { border-color: var(--accent); background: var(--ink-3); color: var(--accent); font-weight: 600; }
+
         .symgrid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; }
         .symbtn { display: flex; align-items: center; justify-content: center; padding: 5px;
                   background: var(--ink); border: 1px solid var(--rule); border-radius: 3px; cursor: pointer; }
@@ -198,11 +206,17 @@ export const STYLES = `
 
         /* ---- detail card ---- */
         .card { position: absolute; background: var(--ink-2); border: 1px solid var(--rule);
-                border-radius: 5px; padding: 0 0 12px; box-shadow: 0 16px 44px rgba(0,0,0,.6);
-                animation: pop .12s ease-out; overflow: hidden; z-index: 15; }
+                border-radius: 5px; box-shadow: 0 16px 44px rgba(0,0,0,.6);
+                animation: pop .12s ease-out; overflow: hidden; z-index: 15;
+                display: flex; flex-direction: column; }
         @keyframes pop { from { opacity: 0; transform: translateY(-4px); } }
         @media (prefers-reduced-motion: reduce) { .card { animation: none; } }
-        .card > *:not(.card-img):not(.card-x) { margin-left: 16px; margin-right: 16px; }
+        /* Content scrolls independently of the close button, so a long
+           description or a tall picture cannot push the Edit button — or the
+           close button itself — off screen. Height is capped and positioned in
+           JS, which measures the real content once it has rendered. */
+        .card-scroll { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 12px; }
+        .card-scroll > *:not(.card-img) { margin-left: 16px; margin-right: 16px; }
         .card-img { width: 100%; height: 150px; object-fit: cover; display: block;
                     border-bottom: 1px solid var(--rule); }
         .card-x { position: absolute; top: 4px; right: 6px; background: rgba(13,19,30,.7); border: 0;
@@ -212,7 +226,9 @@ export const STYLES = `
         .card-cat { display: flex; align-items: center; gap: 6px; margin-top: 14px;
                     font: 9px ui-monospace, monospace; letter-spacing: .13em;
                     text-transform: uppercase; color: var(--muted); }
-        .card-star { color: var(--accent); font-size: 11px; line-height: 1; margin-left: 2px; }
+        .card-star { color: var(--accent); font-size: 9px; letter-spacing: .08em; text-transform: uppercase;
+                     border: 1px solid var(--accent); border-radius: 2px; padding: 2px 5px; line-height: 1; }
+        .card-star.dim { color: var(--muted); border-color: var(--faint); }
         .card-kind { margin-left: auto; border: 1px solid var(--faint); border-radius: 2px; padding: 2px 5px; }
         .card-title { margin: 7px 16px 10px; font-size: 15px; font-weight: 600; line-height: 1.28;
                       padding-right: 10px; }
@@ -253,9 +269,24 @@ export const STYLES = `
         .ctxmenu button.danger { color: var(--danger); }
         .ctx-sep { display: block; height: 1px; background: var(--faint); margin: 4px 2px; }
 
-        .sizesel { background: var(--ink-2); border: 1px solid var(--rule); color: var(--text);
-                   font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em;
-                   padding: 6px 6px; border-radius: 3px; cursor: pointer; }
+        .sizeslider { display: flex; align-items: center; gap: 7px; }
+        .sizeslider span { font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+                            color: var(--muted); width: 34px; text-align: right; flex: none; }
+        .sizeslider input[type=range] { width: 92px; height: 20px; margin: 0; background: none;
+                                         -webkit-appearance: none; appearance: none; cursor: pointer; }
+        .sizeslider input[type=range]::-webkit-slider-runnable-track {
+          height: 3px; background: var(--rule); border-radius: 2px; }
+        .sizeslider input[type=range]::-moz-range-track {
+          height: 3px; background: var(--rule); border-radius: 2px; }
+        .sizeslider input[type=range]::-webkit-slider-thumb {
+          -webkit-appearance: none; width: 12px; height: 12px; margin-top: -4.5px;
+          border-radius: 50%; background: var(--accent); border: 0;
+          box-shadow: 0 0 0 2px var(--ink-2); }
+        .sizeslider input[type=range]::-moz-range-thumb {
+          width: 12px; height: 12px; border-radius: 50%; background: var(--accent); border: 0;
+          box-shadow: 0 0 0 2px var(--ink-2); }
+
+        canvas.surface.axis-resize { cursor: ns-resize; }
 
         .help { position: absolute; right: 14px; bottom: 14px; background: var(--ink-2);
                 border: 1px solid var(--rule); border-radius: 4px; padding: 14px 16px; max-width: 290px;

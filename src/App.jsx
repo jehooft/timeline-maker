@@ -3,13 +3,14 @@
 import React, { useRef, useEffect, useState, useMemo, useReducer, useCallback } from "react";
 import {
   MAX_T, PREC_SEC, MIN_SPP, MAX_SPP, clampT, toBig, bmax, nowT, tFromCivil,
-  fmtInstant, fmtDur, parseDateInput, instantToInput,
+  fmtInstant, fmtDur, parseDateInput, instantToInput, openFadeEndT,
 } from "./time.js";
 import { pickStep, majorTicks, tickLabel, precisionForStep } from "./ticks.js";
 import { drawSymbol } from "./symbols.jsx";
 import { processImage, externalImage } from "./images.js";
 import {
   uid, PALETTE, starterDoc, buildIndex, queryRange, packRows, packLanes, siblingClash,
+  IMP,
 } from "./model.js";
 import { ScaleRail } from "./ui/ScaleRail.jsx";
 import { DetailCard } from "./ui/DetailCard.jsx";
@@ -49,6 +50,15 @@ const DRAWER_W = 330;     // the editor drawer, which the detail card must dodge
 const SIZE_WARN = 2.6e6;
 const EXPORT_NAG = 50;    // edits since the last export before a reminder
 
+/* How big a symbol is drawn, and whether it carries a halo, per importance
+   level — indexed by IMP.TRIVIAL..IMP.CRITICAL. */
+const IMP_SIZE = [0.62, 0.82, 1, 1.12, 1.24];
+const IMP_RINGS = [0, 0, 0, 1, 2];    // halo rings: none, none, none, one, two
+const LABEL_SUPPRESS_PX = 40;   // an Unimportant label this close to a stronger event hides
+const DEFAULT_IMG_ROWS = 1.6;   // rows of vertical space kept for pinned pictures
+const MAX_IMG_ROWS = 8;
+const AXIS_GRAB_PX = 8;         // how close to the axis line counts as "grabbing" it
+
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
 /* Roughly what this timeline occupies once written out. Pictures dominate, and
@@ -65,6 +75,41 @@ function estimateBytes(doc) {
   return n;
 }
 const fmtBytes = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + " MB" : Math.round(n / 1e3) + " KB");
+
+/* Colours passed to fadeRect are always the hex era/category/event colours
+   (PALETTE entries or a user-picked swatch), never a CSS variable, so a plain
+   hex parse is enough. */
+function hexA(hex, a) {
+  const h = (hex || "#888888").replace("#", "");
+  const r = parseInt(h.slice(0, 2), 16) || 0, g = parseInt(h.slice(2, 4), 16) || 0, b = parseInt(h.slice(4, 6), 16) || 0;
+  return "rgba(" + r + "," + g + "," + b + "," + a + ")";
+}
+/* A filled rect that fades to nothing past `fadeFromX`, reaching zero alpha at
+   `fadeToX`. Used for the tail of anything ongoing — solid up to "now", tapering
+   out after, rather than either a hard cut or running solid to the screen edge. */
+function fadeRect(ctx, x0, x1, y, h, color, alpha, open, fadeFromX, fadeToX) {
+  if (x1 <= x0) return;
+  if (!open || x1 <= fadeFromX) {
+    ctx.globalAlpha = alpha; ctx.fillStyle = color;
+    ctx.fillRect(x0, y, x1 - x0, h);
+    ctx.globalAlpha = 1;
+    return;
+  }
+  const solidEnd = Math.min(x1, Math.max(x0, fadeFromX));
+  if (solidEnd > x0) {
+    ctx.globalAlpha = alpha; ctx.fillStyle = color;
+    ctx.fillRect(x0, y, solidEnd - x0, h);
+    ctx.globalAlpha = 1;
+  }
+  const fs = Math.max(x0, fadeFromX), fe = Math.min(x1, fadeToX);
+  if (fe > fs + 0.5) {
+    const grad = ctx.createLinearGradient(fs, 0, fe, 0);
+    grad.addColorStop(0, hexA(color, alpha));
+    grad.addColorStop(1, hexA(color, 0));
+    ctx.fillStyle = grad;
+    ctx.fillRect(fs, y, fe - fs, h);
+  }
+}
 
 function ellipsize(text, maxW, font, measure) {
   if (measure(text, font) <= maxW) return text;
@@ -102,11 +147,16 @@ export default function TimelineApp() {
   const eraAnimRef = useRef(new Map());    // era id  -> visible 0..1
   const rowAnimRef = useRef(new Map());    // item    -> fractional row
   const visAnimRef = useRef(new Map());    // picture -> shown 0..1
-  const miscAnimRef = useRef(new Map());   // odds and ends, e.g. the axis line
   const lastFrameRef = useRef(0);
   const reduceMotionRef = useRef(false);
   const sizeWarnedRef = useRef(false);
   const nagRef = useRef(0);
+  /* The picture rail's height, in rows, set by dragging the axis (§2). Read
+     live during render like viewRef, so dragging never waits on a re-render. */
+  const imgAreaRowsRef = useRef(DEFAULT_IMG_ROWS);
+  const axisYRef = useRef(0);       // where the axis actually landed last frame, for hit-testing
+  const axisDragRef = useRef(false);
+  const axisHoverRef = useRef(false);
 
   const [, bump] = useReducer((x) => x + 1, 0);
   /* The document lives inside a history, so every edit is undoable. `setDoc`
@@ -145,6 +195,10 @@ export default function TimelineApp() {
   const [toast, setToast] = useState(null);
   const [menu, setMenu] = useState(null);      // { item, kind, x, y }
   const [unexported, setUnexported] = useState(0);
+  const [axisHover, setAxisHover] = useState(false);
+  /* Mirrors imgAreaRowsRef for persistence only — render reads the ref live,
+     the same way it reads viewRef, so dragging never waits on a re-render. */
+  const [imgAreaRows, setImgAreaRows] = useState(DEFAULT_IMG_ROWS);
   const saveTimer = useRef(0);
   const skipSave = useRef(true);
 
@@ -347,12 +401,26 @@ export default function TimelineApp() {
       seen.vis.add(key);
       return ease(visAnimRef.current, key, target, kImg, 0.006);
     };
-    const easePx = (key, target) => ease(miscAnimRef.current, key, target, kMove, 0.25);
 
     const layoutT0 = tOf(-w * 0.5), layoutT1 = tOf(w * 1.5);
     const visible = queryRange(index, layoutT0, layoutT1);
+    const nowX = xOf(nowT());
+    /* Where an ongoing item's visible extent stops: not the true end (it has
+       none), and not the edge of the screen either — a fixed pixel sentinel
+       there was the original bug, since it made anything open look like it
+       would run for as long as the viewport happens to be wide open, at any
+       zoom. This is a real instant, so it recedes properly as you zoom out. */
+    const openEndX = (t0) => xOf(openFadeEndT(t0));
 
-    /* ---- 1. pinned images, centred on the middle of what they mark ---- */
+    /* ---- 1. the picture rail. Its height is a setting (dragging the axis),
+       not a function of how many pictures happen to be pinned right now — that
+       coupling was what made the whole timeline bob on every zoom or pan. */
+    const imgAreaRows = imgAreaRowsRef.current;
+    const maxImgRows = Math.max(0, Math.floor(imgAreaRows));
+    const axisRaw = Math.min(Math.max(axisMin, 20 + imgAreaRows * imgRow + imgHang), h * 0.72);
+    const AXIS_Y = axisRaw;
+    axisYRef.current = AXIS_Y;
+
     const pinnedRaw = [];
     for (const it of visible) {
       /* Pinned pictures belong to their category, so hiding the category hides
@@ -368,7 +436,7 @@ export default function TimelineApp() {
         : el && el.naturalWidth ? el.naturalWidth / Math.max(1, el.naturalHeight) : 4 / 3;
       const iw = Math.max(40, Math.min(Math.round(220 * S), Math.round(imgH * ratio)));
       const a = xOf(it.t0);
-      const b = it.isSpan ? (it.open ? w + 40 : xOf(it.t1)) : a;
+      const b = it.isSpan ? (it.open ? openEndX(it.t0) : xOf(it.t1)) : a;
       let px = (a + b) / 2;
       if (b - a > 2) {
         /* keep the picture over the visible slice of a long span */
@@ -379,13 +447,12 @@ export default function TimelineApp() {
       const caption = ellipsize(it.title, capMax, fT, measure);
       const capW = measure(caption, fT);
       const half = Math.max(iw, capW) / 2 + 5;
-      /* Importance carries no layout weight of its own — a picture sits wherever
-         it fits, marked or not. It only decides who keeps a lane when the lanes
-         run out. See packLanes. */
+      /* Priority carries no layout weight of its own — a picture sits wherever
+         it fits, whatever its importance. It only decides who keeps a lane when
+         the lanes run out. See packLanes. */
       pinnedRaw.push({ key: "img:" + it.id, it, el, iw, x: px, caption, capW,
-        important: !!it.important, x0: px - half, x1: px + half });
+        prio: it.imp ?? IMP.NORMAL, x0: px - half, x1: px + half });
     }
-    const maxImgRows = Math.max(1, Math.floor((h * 0.5 - 40) / imgRow));
     const packedImgs = packLanes(pinnedRaw, 8, maxImgRows);
 
     /* A dropped picture keeps the lane it last held and shrinks away there,
@@ -395,10 +462,6 @@ export default function TimelineApp() {
       const rowTarget = p.row >= 0 ? p.row : (rowAnimRef.current.get(p.key) ?? 0);
       p.rowF = easeRow(p.key, rowTarget);
     }
-    const axisRaw = pinnedRaw.length
-      ? Math.max(axisMin, 20 + packedImgs.rows * imgRow + imgHang) : axisMin;
-    /* The axis glides too, so bands do not lurch when a picture comes or goes. */
-    const AXIS_Y = easePx("axis", axisRaw);
 
     const step = pickStep(140 * S * v.spp);
     const majors = majorTicks(step, tOf(-60), tOf(w + 60));
@@ -419,21 +482,49 @@ export default function TimelineApp() {
       const bucket = byCat.get(it.cat);
       if (!bucket) continue;
       const x1 = xOf(it.t0);
-      const x2 = it.isSpan ? (it.open ? w + 40 : xOf(it.t1)) : x1;
+      const x2 = it.isSpan ? (it.open ? openEndX(it.t0) : xOf(it.t1)) : x1;
       if (it.kind === "era") {
         bucket.eras.push({ ...it, key: it.id, x1p: x1, x2p: x2 });
       } else {
-        const lw = showLabels || it.important ? measure(it.title, fM) : 0;
-        let x0f, x1f;
+        /* Position only, for now — label width depends on whether a nearby
+           stronger event suppresses this one, which needs every event in the
+           category placed first. Finalised just below, per category. */
+        bucket.events.push({ ...it, key: it.id, x1p: x1, x2p: x2 });
+      }
+    }
+    for (const bucket of byCat.values()) {
+      if (!bucket.events.length) continue;
+      /* An Unimportant label disappears next to a stronger event — Normal or
+         above — so the timeline reads as one thing at a glance rather than two
+         overlapping labels fighting for the same few pixels. Trivial never
+         shows a label at all; Important and Critical always do. */
+      const strongXs = bucket.events
+        .filter((e) => (e.imp ?? IMP.NORMAL) > IMP.UNIMPORTANT)
+        .map((e) => e.x1p)
+        .sort((a, b) => a - b);
+      const nearStrong = (x) => {
+        let lo = 0, hi = strongXs.length;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (strongXs[mid] < x) lo = mid + 1; else hi = mid; }
+        const px = LABEL_SUPPRESS_PX * S;
+        return (strongXs[lo] !== undefined && strongXs[lo] - x <= px)
+          || (strongXs[lo - 1] !== undefined && x - strongXs[lo - 1] <= px);
+      };
+      for (const it of bucket.events) {
+        const lvl = it.imp ?? IMP.NORMAL;
+        const showLbl = lvl === IMP.TRIVIAL ? false
+          : lvl >= IMP.IMPORTANT ? true
+            : lvl === IMP.UNIMPORTANT ? (showLabels && !nearStrong(it.x1p))
+              : showLabels;
+        it.lw = showLbl ? measure(it.title, fM) : 0;
+        const x1 = it.x1p, x2 = it.x2p, lw = it.lw;
         if (it.isSpan) {
           const wide = x2 - x1 > lw + 24 * S;
-          x0f = x1 - 9 * S;
-          x1f = wide ? Math.max(x2 + 4, x1 + 14 * S + lw + 8) : x2 + 12 * S + lw;
+          it.x0 = x1 - 9 * S;
+          it.x1 = wide ? Math.max(x2 + 4, x1 + 14 * S + lw + 8) : x2 + 12 * S + lw;
         } else {
-          x0f = x1 - 9 * S;
-          x1f = x1 + 9 * S + (lw ? lw + 8 : 0);
+          it.x0 = x1 - 9 * S;
+          it.x1 = x1 + 9 * S + (lw ? lw + 8 : 0);
         }
-        bucket.events.push({ ...it, key: it.id, x1p: x1, x2p: x2, lw, x0: x0f, x1: x1f });
       }
     }
 
@@ -531,11 +622,8 @@ export default function TimelineApp() {
           const color = er.color || cat.color;
           const bx1 = Math.max(-30, er.x1p), bx2 = Math.min(w + 30, er.x2p);
           if (bx2 <= bx1) continue;
-          ctx.globalAlpha = aTint * visOf(er);
-          ctx.fillStyle = color;
-          ctx.fillRect(bx1, stripTop, bx2 - bx1, contentBottom - stripTop);
+          fadeRect(ctx, bx1, bx2, stripTop, contentBottom - stripTop, color, aTint * visOf(er), er.open, nowX, er.x2p);
         }
-        ctx.globalAlpha = 1;
 
         /* 3b. boundary lines run the full height of the band */
         for (const er of sorted) {
@@ -565,10 +653,8 @@ export default function TimelineApp() {
           if (bx2 <= bx1) continue;
           const inner = Math.max(1, barH - 3);
 
-          ctx.globalAlpha = (sel || hov ? Math.min(1, aEra + 0.2) : aEra) * a;
-          ctx.fillStyle = color;
-          ctx.fillRect(bx1, top + 1, bx2 - bx1, inner);
-          ctx.globalAlpha = 1;
+          fadeRect(ctx, bx1, bx2, top + 1, inner, color,
+            (sel || hov ? Math.min(1, aEra + 0.2) : aEra) * a, er.open, nowX, er.x2p);
           /* hairline seam so abutting eras stay legible as separate bars */
           if (er.x1p > 0 && er.x1p < w) {
             ctx.globalAlpha = a;
@@ -629,13 +715,16 @@ export default function TimelineApp() {
         const color = it.color || cat.color;
         const sel = selectedId === it.id, hov = hover && hover.id === it.id;
 
+        const lvl = it.imp ?? IMP.NORMAL;
+        const sizeScale = IMP_SIZE[lvl] ?? 1;
         if (it.isSpan) {
           const bx1 = Math.max(-20, it.x1p), bx2 = Math.min(w + 20, Math.max(it.x2p, it.x1p + 2));
-          ctx.globalAlpha = sel || hov ? 1 : 0.78;
-          ctx.fillStyle = color;
-          ctx.fillRect(bx1, cy - 2.5 * S, Math.max(2, bx2 - bx1), 5 * S);
-          if (it.x2p < w + 20 && it.x2p > -20) ctx.fillRect(Math.round(it.x2p) - 1, cy - 6 * S, 2, 12 * S);
-          ctx.globalAlpha = 1;
+          fadeRect(ctx, bx1, bx2, cy - 2.5 * S, 5 * S, color, sel || hov ? 1 : 0.78, it.open, nowX, it.x2p);
+          if (!it.open && it.x2p < w + 20 && it.x2p > -20) {
+            ctx.globalAlpha = sel || hov ? 1 : 0.78; ctx.fillStyle = color;
+            ctx.fillRect(Math.round(it.x2p) - 1, cy - 6 * S, 2, 12 * S);
+            ctx.globalAlpha = 1;
+          }
         }
         if (it.x1p > -30 && it.x1p < w + 30) {
           if (sel || hov) {
@@ -643,23 +732,28 @@ export default function TimelineApp() {
             ctx.beginPath(); ctx.arc(it.x1p, cy, 12 * S, 0, 6.2832); ctx.fill();
             ctx.globalAlpha = 1;
           }
-          /* An important event carries a halo and a ring: readable at a glance,
-             independent of whichever symbol and colour the event already uses,
-             and still legible when the symbol itself is only a few pixels. */
-          if (it.important) {
+          /* Important and Critical events carry a halo and a ring — Critical
+             gets a second, wider one — readable at a glance, independent of
+             whichever symbol and colour the event already uses, and still
+             legible when the symbol itself is only a few pixels. */
+          const rings = IMP_RINGS[lvl] ?? 0;
+          if (rings > 0) {
             ctx.globalAlpha = 0.18; ctx.fillStyle = color;
             ctx.beginPath(); ctx.arc(it.x1p, cy, 11 * S, 0, 6.2832); ctx.fill();
             ctx.globalAlpha = sel || hov ? 1 : 0.85;
             ctx.strokeStyle = color;
             ctx.lineWidth = 1.5;
             ctx.beginPath(); ctx.arc(it.x1p, cy, 10 * S, 0, 6.2832); ctx.stroke();
+            if (rings > 1) {
+              ctx.beginPath(); ctx.arc(it.x1p, cy, 13.5 * S, 0, 6.2832); ctx.stroke();
+            }
             ctx.lineWidth = 1; ctx.globalAlpha = 1;
           }
-          drawSymbol(ctx, it.sym, it.x1p, cy, it.important ? symR * 1.12 : symR, color);
+          drawSymbol(ctx, it.sym, it.x1p, cy, symR * sizeScale, color);
         }
-        if (showLabels || it.important) {
+        if (it.lw > 0) {
           ctx.font = fM;
-          ctx.fillStyle = sel || hov || it.important ? cText : cMuted;
+          ctx.fillStyle = sel || hov || lvl >= IMP.IMPORTANT ? cText : cMuted;
           if (it.isSpan) {
             const wide = it.x2p - it.x1p > it.lw + 24 * S;
             const lx = wide ? Math.max(Math.min(it.x1p + 14 * S, it.x2p - it.lw - 6), 10) : it.x2p + 10;
@@ -670,9 +764,9 @@ export default function TimelineApp() {
         }
         hits.push({
           item: it, x: it.x1p, y: cy,
-          x0: Math.min(it.x1p - 9 * S, it.x0),
+          x0: Math.min(it.x1p - 9 * S * sizeScale, it.x0),
           x1: it.isSpan ? Math.max(it.x2p + 6, it.x1p + 9 * S)
-            : it.x1p + 9 * S + (showLabels || it.important ? it.lw + 8 : 0),
+            : it.x1p + 9 * S * sizeScale + (it.lw ? it.lw + 8 : 0),
           y0: cy - 11 * S, y1: cy + 11 * S,
         });
         if (it.id === selectedId) selAnchorRef.current = { x: Math.max(20, Math.min(w - 20, it.x1p)), y: cy };
@@ -689,13 +783,14 @@ export default function TimelineApp() {
             const label = String(cl.count);
             const lw = measure(label, fT);
             const rw = Math.max(18 * S, lw + 14 * S);
-            ctx.globalAlpha = hov ? 0.95 : cl.important ? 0.85 : 0.62;
+            const clImportant = (cl.imp ?? IMP.NORMAL) === IMP.IMPORTANT;
+            ctx.globalAlpha = hov ? 0.95 : clImportant ? 0.85 : 0.62;
             ctx.fillStyle = cat.color;
             const rx = cl.x1p - rw / 2, ry = cy - 8 * S, rh = 16 * S;
             if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(rx, ry, rw, rh, rh / 2); ctx.fill(); }
             else ctx.fillRect(rx, ry, rw, rh);
             ctx.globalAlpha = 1;
-            if (cl.important) {
+            if (clImportant) {
               ctx.strokeStyle = cat.color;
               ctx.lineWidth = 1.5;
               if (ctx.roundRect) {
@@ -831,8 +926,14 @@ export default function TimelineApp() {
       }
       ctx.stroke();
     }
-    ctx.strokeStyle = cRule; ctx.beginPath();
+    /* The axis doubles as a drag handle for the picture rail's height (§2), so
+       it brightens under the cursor the way anything grabbable should. */
+    const axisActive = axisHoverRef.current || axisDragRef.current;
+    ctx.strokeStyle = axisActive ? cAccent : cRule;
+    ctx.lineWidth = axisActive ? 2 : 1;
+    ctx.beginPath();
     ctx.moveTo(0, Math.round(AXIS_Y) + 0.5); ctx.lineTo(w, Math.round(AXIS_Y) + 0.5); ctx.stroke();
+    ctx.lineWidth = 1;
 
     ctx.strokeStyle = cMuted; ctx.beginPath();
     for (const t of majors) {
@@ -973,8 +1074,21 @@ export default function TimelineApp() {
     return true;
   };
 
+  /* Grabbing the axis resizes the picture rail directly — the pointer sets the
+     boundary, rather than nudging a delta, so it tracks the cursor exactly. */
+  const nearAxis = (px, py) => Math.abs(py - axisYRef.current) <= AXIS_GRAB_PX && !hitTest(px, py);
+  const setImgAreaFromY = (py) => {
+    const imgH = Math.round(IMG_H * uiScale), capH = Math.round(IMG_CAP * uiScale),
+      imgHang = Math.round(IMG_HANG * uiScale);
+    const imgRow = imgH + capH + Math.round(IMG_GAP * uiScale);
+    imgAreaRowsRef.current = Math.max(0, Math.min(MAX_IMG_ROWS, (py - 20 - imgHang) / imgRow));
+    invalidate();
+  };
+
   const onPointerDown = (e) => {
     e.currentTarget.setPointerCapture(e.pointerId);
+    const r = e.currentTarget.getBoundingClientRect();
+    const px = e.clientX - r.left, py = e.clientY - r.top;
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     dragState.current = { moved: 0 };
     if (searchOpen) setSearchOpen(false);
@@ -982,12 +1096,15 @@ export default function TimelineApp() {
     clearHoverTimer();
     clearPressTimer();
     if (preview) setPreview(null);
+    if (pointers.current.size === 1 && nearAxis(px, py)) {
+      axisDragRef.current = true;
+      setImgAreaFromY(py);
+      return;
+    }
     if (pointers.current.size === 2) {
       const [a, b] = [...pointers.current.values()];
       pinch.current = { dist: Math.hypot(a.x - b.x, a.y - b.y), mid: (a.x + b.x) / 2 };
     } else if (e.pointerType === "touch") {
-      const r = e.currentTarget.getBoundingClientRect();
-      const px = e.clientX - r.left, py = e.clientY - r.top;
       pressTimer.current = setTimeout(() => {
         pressTimer.current = 0;
         /* only if the finger stayed put — otherwise this was a pan */
@@ -999,8 +1116,15 @@ export default function TimelineApp() {
   };
   const onPointerMove = (e) => {
     const r = e.currentTarget.getBoundingClientRect();
+    if (axisDragRef.current) { setImgAreaFromY(e.clientY - r.top); return; }
     const prev = pointers.current.get(e.pointerId);
-    if (!prev) { setHoverTarget(hitTest(e.clientX - r.left, e.clientY - r.top)); return; }
+    if (!prev) {
+      const px = e.clientX - r.left, py = e.clientY - r.top;
+      const overAxis = nearAxis(px, py);
+      if (overAxis !== axisHoverRef.current) { axisHoverRef.current = overAxis; setAxisHover(overAxis); }
+      setHoverTarget(overAxis ? null : hitTest(px, py));
+      return;
+    }
     const cur = { x: e.clientX, y: e.clientY };
     pointers.current.set(e.pointerId, cur);
     if (dragState.current) dragState.current.moved += Math.abs(cur.x - prev.x) + Math.abs(cur.y - prev.y);
@@ -1019,6 +1143,13 @@ export default function TimelineApp() {
   };
   const onPointerUp = (e) => {
     const r = e.currentTarget.getBoundingClientRect();
+    if (axisDragRef.current) {
+      axisDragRef.current = false;
+      setImgAreaRows(imgAreaRowsRef.current);   // commits the drag for persistence
+      pointers.current.delete(e.pointerId);
+      dragState.current = null;
+      return;
+    }
     const ds = dragState.current;
     pointers.current.delete(e.pointerId);
     if (pointers.current.size < 2) pinch.current = null;
@@ -1038,7 +1169,10 @@ export default function TimelineApp() {
       } else setSelectedId(null);
     }
   };
-  const onPointerLeave = () => { clearHoverTimer(); clearPressTimer(); setHover(null); setPreview(null); };
+  const onPointerLeave = () => {
+    clearHoverTimer(); clearPressTimer(); setHover(null); setPreview(null);
+    if (axisHoverRef.current) { axisHoverRef.current = false; setAxisHover(false); }
+  };
   useEffect(() => clearPressTimer, []);
 
   /* ------------------------------------------------------------------- editing */
@@ -1051,7 +1185,8 @@ export default function TimelineApp() {
     return {
       kind, id: null, title: "", cat: doc.categories[0] ? doc.categories[0].id : "",
       parent: "", sym: "dot", color: "", startStr: instantToInput(c.t, c.precision), endStr: "",
-      desc: "", tagsStr: "", linksStr: "", imageId: "", pinImage: false, important: false,
+      desc: "", tagsStr: "", linksStr: "", imageId: "", pinImage: false,
+      imp: IMP.NORMAL, ongoing: false,
     };
   };
   const draftFrom = (item, kind) => ({
@@ -1062,7 +1197,7 @@ export default function TimelineApp() {
     desc: item.desc || "", tagsStr: (item.tags || []).join(", "),
     linksStr: (item.links || []).join("\n"),
     imageId: item.imageId || "", pinImage: !!item.pinImage,
-    important: !!item.important,
+    imp: item.imp ?? IMP.NORMAL, ongoing: !!item.ongoing,
   });
   const onField = (k, val) => setDraft((d) => ({ ...d, [k]: val }));
 
@@ -1072,8 +1207,15 @@ export default function TimelineApp() {
     const adopt = Array.isArray(adoptIds) && adoptIds.length ? adoptIds : null;
     const start = parseDateInput(draft.startStr);
     if (!start || !draft.title.trim()) return;
-    const end = draft.endStr.trim() ? parseDateInput(draft.endStr) : null;
+    const endBlank = !draft.endStr.trim();
+    const end = endBlank ? null : parseDateInput(draft.endStr);
     const isEra = draft.kind === "era";
+    /* An era with no end has always meant "open"; an event needs the explicit
+       checkbox, since a blank end otherwise just means a point in time. A span
+       with no end and a start that has not happened yet has nothing to fade
+       from, so it is refused rather than drawn as permanently, uselessly open. */
+    const wouldBeOngoing = endBlank && (isEra || draft.ongoing);
+    if (wouldBeOngoing && start.t > nowT()) return;
     const obj = {
       id: draft.id || uid(isEra ? "r" : "e"),
       cat: draft.cat, title: draft.title.trim(), start, end,
@@ -1087,7 +1229,8 @@ export default function TimelineApp() {
     if (isEra) obj.parent = draft.parent || null;
     else {
       obj.sym = draft.sym || "dot";
-      if (draft.important) obj.important = true;
+      if (draft.imp !== IMP.NORMAL) obj.imp = draft.imp;
+      if (endBlank && draft.ongoing) obj.ongoing = true;
     }
 
     /* Adopting resolves the overlap, so the clash check is against the tree as
@@ -1358,6 +1501,10 @@ export default function TimelineApp() {
         if (st.uiScale) setUiScale(st.uiScale);
         if (typeof st.showLabels === "boolean") setShowLabels(st.showLabels);
         if (st.theme === "light" || st.theme === "dark") setTheme(st.theme);
+        if (typeof st.imgAreaRows === "number") {
+          imgAreaRowsRef.current = st.imgAreaRows;
+          setImgAreaRows(st.imgAreaRows);
+        }
         skipSave.current = true;
         setHist(reset(chosen));
         setEntries(list);
@@ -1414,8 +1561,8 @@ export default function TimelineApp() {
   }, [unexported, booted]);
 
   useEffect(() => {
-    if (booted) saveAppState({ lastOpenedId: doc.id, uiScale, showLabels, theme });
-  }, [booted, doc.id, uiScale, showLabels, theme]);
+    if (booted) saveAppState({ lastOpenedId: doc.id, uiScale, showLabels, theme, imgAreaRows });
+  }, [booted, doc.id, uiScale, showLabels, theme, imgAreaRows]);
 
   /* A backstop: whatever goes wrong underneath, the controls come back. */
   useEffect(() => {
@@ -1575,13 +1722,12 @@ export default function TimelineApp() {
         </div>
         <button className="btn" onClick={fitAll}>Fit</button>
         <button className="btn" aria-pressed={showLabels} onClick={() => setShowLabels(!showLabels)}>Labels</button>
-        <select className="sizesel" value={uiScale} aria-label="Display size"
-          onChange={(e) => setUiScale(parseFloat(e.target.value))}>
-          <option value={0.85}>Small</option>
-          <option value={1}>Normal</option>
-          <option value={1.2}>Large</option>
-          <option value={1.45}>Extra large</option>
-        </select>
+        <div className="sizeslider" title="Display size — pictures and type scale with it in real time">
+          <input type="range" min={0.6} max={2} step={0.01} value={uiScale}
+            aria-label="Display size"
+            onChange={(e) => setUiScale(parseFloat(e.target.value))} />
+          <span>{Math.round(uiScale * 100)}%</span>
+        </div>
         <button className="btn" aria-pressed={showHelp} onClick={() => setShowHelp(!showHelp)}>Keys</button>
         <button className="btn" onClick={toggleSearch} aria-pressed={searchOpen}
           title={searchOpen ? "Close search (Esc)" : "Search (Ctrl+F)"}>Find</button>
@@ -1626,7 +1772,8 @@ export default function TimelineApp() {
         )}
 
         <div className="stage" ref={wrapRef}>
-          <canvas ref={canvasRef} className={"surface" + (hover ? " pointing" : "")}
+          <canvas ref={canvasRef}
+            className={"surface" + (hover ? " pointing" : "") + (axisHover ? " axis-resize" : "")}
             onPointerDown={onPointerDown} onPointerMove={onPointerMove}
             onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
             onPointerLeave={onPointerLeave}
@@ -1681,6 +1828,7 @@ export default function TimelineApp() {
               <p><kbd>Tab</kbd> next item · <kbd>L</kbd> theme · <kbd>Esc</kbd> close</p>
               <p style={{ marginTop: 8, opacity: .8 }}>Rest on a pinned picture to peek at its card.</p>
               <p style={{ opacity: .8 }}>Right-click an item (or hold on touch) for more.</p>
+              <p style={{ opacity: .8 }}>Drag the axis itself to resize the picture rail.</p>
             </div>
           )}
 

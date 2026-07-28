@@ -3,6 +3,7 @@
 import React from "react";
 import { fmtInstant } from "../time.js";
 import { SymbolChip } from "../symbols.jsx";
+import { IMP } from "../model.js";
 
 /* ------------------------------------------------------------- the items panel */
 export function ItemsPanel({ doc, index, collapsed, expanded, selectedId, persistent, hidden, onToggleHidden, onAdd, onAddCategory,
@@ -102,17 +103,22 @@ export function ItemsPanel({ doc, index, collapsed, expanded, selectedId, persis
                       <button className="item-edit" onClick={() => onEditItem(r, "era")} aria-label="Edit">✎</button>
                     </div>
                   ))}
-                  {evs.map((e) => (
-                    <div key={e.id} className={"item" + (selectedId === e.id ? " sel" : "")}>
-                      <button className="item-main" onClick={() => onGoto(e)}>
-                        <SymbolChip name={e.sym} color={e.color || cat.color} size={14} />
-                        <span className={"item-title" + (e.important ? " key" : "")}>{e.title}</span>
-                        {e.important && <span className="item-star" title="Important">★</span>}
-                        <span className="item-date">{fmtInstant(e.start.t, e.start.precision)}</span>
-                      </button>
-                      <button className="item-edit" onClick={() => onEditItem(e, "event")} aria-label="Edit">✎</button>
-                    </div>
-                  ))}
+                  {evs.map((e) => {
+                    const imp = e.imp ?? IMP.NORMAL;
+                    return (
+                      <div key={e.id} className={"item" + (selectedId === e.id ? " sel" : "")}>
+                        <button className="item-main" onClick={() => onGoto(e)}>
+                          <SymbolChip name={e.sym} color={e.color || cat.color} size={14} />
+                          <span className={"item-title" + (imp >= IMP.IMPORTANT ? " key" : "")
+                            + (imp <= IMP.UNIMPORTANT ? " dim" : "")}>{e.title}</span>
+                          {imp === IMP.CRITICAL && <span className="item-star" title="Critical">★★</span>}
+                          {imp === IMP.IMPORTANT && <span className="item-star" title="Important">★</span>}
+                          <span className="item-date">{fmtInstant(e.start.t, e.start.precision)}</span>
+                        </button>
+                        <button className="item-edit" onClick={() => onEditItem(e, "event")} aria-label="Edit">✎</button>
+                      </div>
+                    );
+                  })}
                   {eras.length + evs.length === 0 && <p className="empty">Nothing here yet.</p>}
                 </div>
               )}

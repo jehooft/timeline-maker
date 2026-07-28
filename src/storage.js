@@ -8,6 +8,8 @@
    Everything else (encode/decode, the library, garbage collection, CSV/JSON
    export) is identical to the Claude build. */
 
+import { IMP } from "./model.js";
+
 const PREFIX = "timeline-maker:";
 
 const present = typeof window !== "undefined" && typeof window.localStorage !== "undefined";
@@ -79,6 +81,18 @@ export function encodeDoc(doc, { withImages = false } = {}) {
   return out;
 }
 
+/* A timeline saved before importance became a five-level scale carries the old
+   `important: true/false` flag instead of `imp`. Migrated once, here, so every
+   other file only ever has to know about `imp`. */
+function migrateEvent(e) {
+  const out = { ...e, start: decDate(e.start), end: decDate(e.end) };
+  if (out.imp === undefined && out.important !== undefined) {
+    if (out.important) out.imp = IMP.IMPORTANT;
+    delete out.important;
+  }
+  return out;
+}
+
 export function decodeDoc(raw) {
   if (!raw || raw.format !== "timeline-doc") throw new Error("That file is not a timeline.");
   if (raw.version > 1) throw new Error("That file was made by a newer version of the app.");
@@ -87,7 +101,7 @@ export function decodeDoc(raw) {
     createdAt: raw.createdAt, updatedAt: raw.updatedAt,
     categories: (raw.categories || []).map((c) => ({ ...c })),
     eras: (raw.eras || []).map((r) => ({ ...r, start: decDate(r.start), end: decDate(r.end) })),
-    events: (raw.events || []).map((e) => ({ ...e, start: decDate(e.start), end: decDate(e.end) })),
+    events: (raw.events || []).map(migrateEvent),
     images: raw.images || {},
   };
 }
