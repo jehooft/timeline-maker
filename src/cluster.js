@@ -5,11 +5,14 @@
    are merged into a single counted marker. Clicking one zooms to fit what it
    contains, which turns the problem into the navigation route.
 
-   Spans and eras are never clustered — they are the landmarks you navigate by,
-   and their extent is still meaningful when their start is not. */
+   Eras are never clustered — they are the landmarks you navigate by. A span
+   event joins in only once it has been squeezed too narrow to read as a bar,
+   which is the same bargain the era strip makes: keep a thing while its extent
+   still says something, drop it once it does not. */
 import { IMP } from "./model.js";
 
 export const CLUSTER_GAP = 14;      // px between symbol centres before merging
+export const SPAN_MIN_PX = 20;      // narrower than this and a span is just a point
 
 /* Events only cluster with events of the same importance level: a point that
    matters is never hidden inside a pile of ones that don't, and — as
@@ -17,12 +20,17 @@ export const CLUSTER_GAP = 14;      // px between symbol centres before merging
    would bury it just the same. Critical goes one step further and never
    clusters at all, even with other Critical events, matching how the mark is
    meant to work: always its own, findable thing on the timeline. */
-export function clusterPoints(items, gap = CLUSTER_GAP) {
+export function clusterPoints(items, gap = CLUSTER_GAP, spanMin = SPAN_MIN_PX) {
   const others = [];
   const byLevel = new Map();
   for (const it of items) {
     const lvl = it.imp ?? IMP.NORMAL;
-    if (it.isSpan || lvl === IMP.CRITICAL) { others.push(it); continue; }
+    /* A bar still wide enough to show its duration stays a bar. Below that its
+       extent has stopped meaning anything on screen, so it merges like the
+       point it has become — and comes back out as soon as zooming in gives it
+       its width again. */
+    const stillABar = it.isSpan && (it.x2p - it.x1p) >= spanMin;
+    if (stillABar || lvl === IMP.CRITICAL) { others.push(it); continue; }
     if (!byLevel.has(lvl)) byLevel.set(lvl, []);
     byLevel.get(lvl).push(it);
   }

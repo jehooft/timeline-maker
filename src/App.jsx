@@ -27,7 +27,7 @@ import { importCSV, exportCSV, countsDroppedImages } from "./csv.js";
 import { ContextMenu } from "./ui/ContextMenu.jsx";
 import { makeHistory, commit, undo, redo, reset, canUndo, canRedo } from "./history.js";
 import { searchItems } from "./search.js";
-import { clusterPoints, CLUSTER_GAP } from "./cluster.js";
+import { clusterPoints, CLUSTER_GAP, SPAN_MIN_PX } from "./cluster.js";
 import { SearchBox } from "./ui/SearchBox.jsx";
 
 /* ================================================================== the app */
@@ -623,7 +623,7 @@ export default function TimelineApp() {
          thousand rows. */
       const { singles, clusters } = isCollapsed
         ? { singles: [], clusters: [] }
-        : clusterPoints(bucket.events, CLUSTER_GAP * S);
+        : clusterPoints(bucket.events, CLUSTER_GAP * S, SPAN_MIN_PX * S);
       const packedEvents = isCollapsed ? { items: [], rows: 0 }
         : packRows(singles, 12, prevRowsRef.current, 2);
 
@@ -655,25 +655,33 @@ export default function TimelineApp() {
       }
 
       if (bandTop + bandH > AXIS_Y && bandTop < h) {
-        /* 3a. background tint — each era colours the band beneath it, and
-           nesting compounds, so deeper structure reads as richer colour */
+        /* 3a. background tint — each era colours what sits *under* it, and
+           nesting compounds, so deeper structure reads as richer colour.
+
+           Strictly downward: an era's wash begins at its own strip row, never
+           at the top of the band. Starting every era at stripTop meant a narrow
+           era three layers down repainted the broad eras above it, so a parent
+           took on the colour of its own children. */
         const sorted = [...drawEras].sort((a, b) => a.depth - b.depth);
         for (const er of sorted) {
           const color = er.color || cat.color;
           const bx1 = Math.max(-30, er.x1p), bx2 = Math.min(w + 30, er.x2p);
           if (bx2 <= bx1) continue;
-          fadeRect(ctx, bx1, bx2, stripTop, contentBottom - stripTop, color, aTint * visOf(er), er.open, nowX, er.x2p);
+          const top = stripTop + rowTopOf.get(er.depth);
+          fadeRect(ctx, bx1, bx2, top, contentBottom - top, color, aTint * visOf(er), er.open, nowX, er.x2p);
         }
 
-        /* 3b. boundary lines run the full height of the band */
+        /* 3b. boundary lines, also downward only — a lower era's edges must not
+           draw across the bars of the eras above it. */
         for (const er of sorted) {
           const color = er.color || cat.color;
           ctx.globalAlpha = (0.2 / (1 + er.depth * 0.6)) * visOf(er);
           ctx.strokeStyle = color;
+          const top = stripTop + rowTopOf.get(er.depth);
           for (const bx of [er.x1p, er.open ? null : er.x2p]) {
             if (bx === null || bx < -1 || bx > w + 1) continue;
             ctx.beginPath();
-            ctx.moveTo(Math.round(bx) + 0.5, stripTop);
+            ctx.moveTo(Math.round(bx) + 0.5, top);
             ctx.lineTo(Math.round(bx) + 0.5, contentBottom);
             ctx.stroke();
           }
@@ -795,9 +803,15 @@ export default function TimelineApp() {
           ctx.font = fM;
           ctx.fillStyle = sel || hov || lvl >= IMP.IMPORTANT ? cText : cMuted;
           if (it.isSpan) {
+            /* A bar long enough to hold its own name gets the label sitting
+               above it. One too short puts the label beside the end cap — on
+               the bar's own line, level with it, the way a point event's label
+               sits. It used to keep the raised baseline in that case too, which
+               left the name floating up and to the right of nothing. */
             const wide = it.x2p - it.x1p > it.lw + 24 * S;
-            const lx = wide ? Math.max(Math.min(it.x1p + 14 * S, it.x2p - it.lw - 6), 10) : it.x2p + 10;
-            if (lx < w - 4 && lx + it.lw > 0) ctx.fillText(it.title, lx, rowTop + 9 * S);
+            const lx = wide ? Math.max(Math.min(it.x1p + 14 * S, it.x2p - it.lw - 6), 10) : it.x2p + 10 * S;
+            const ly = wide ? rowTop + 9 * S : cy + 4 * S;
+            if (lx < w - 4 && lx + it.lw > 0) ctx.fillText(it.title, lx, ly);
           } else if (it.x1p < w && it.x1p + it.lw > -40) {
             ctx.fillText(it.title, it.x1p + 11 * S, cy + 4 * S);
           }

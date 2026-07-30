@@ -1,7 +1,7 @@
 /* Undo/redo, search ranking and clustering. */
 import { makeHistory, commit, undo, redo, reset, canUndo, canRedo } from "./src/history.js";
 import { searchItems } from "./src/search.js";
-import { clusterPoints, CLUSTER_GAP } from "./src/cluster.js";
+import { clusterPoints, CLUSTER_GAP, SPAN_MIN_PX } from "./src/cluster.js";
 import { starterDoc, buildIndex } from "./src/model.js";
 
 let pass = 0, fail = 0;
@@ -114,10 +114,10 @@ const ok = (n, c, x = "") => { if (c) pass++; else { fail++; console.log("  FAIL
                ...Array.from({ length: 5 }, (_, i) => mk(i + 10, 400 + i))];
   ok("distinct piles stay distinct", clusterPoints(two).clusters.length === 2);
 
-  /* spans are never clustered, however dense */
+  /* a span still wide enough to read as a bar is never clustered, however dense */
   const spans = Array.from({ length: 20 }, (_, i) => mk(i, 300 + i * 0.1, true));
   const c = clusterPoints(spans);
-  ok("spans are never clustered", c.clusters.length === 0 && c.singles.length === 20);
+  ok("wide spans are never clustered", c.clusters.length === 0 && c.singles.length === 20);
 
   /* a lone point is not a cluster of one */
   ok("a single point is left alone", clusterPoints([mk(1, 0)]).clusters.length === 0);
@@ -193,6 +193,49 @@ const ok = (n, c, x = "") => { if (c) pass++; else { fail++; console.log("  FAIL
   const crits = Array.from({ length: 12 }, (_, i) => mk(i, i * 0.2, CRITICAL));
   const c1 = clusterPoints(crits);
   ok("dense Critical events never merge", c1.clusters.length === 0 && c1.singles.length === 12);
+
+  /* ---- spans join in once they are too narrow to read as bars ----
+     Zoomed out far enough, a duration stops saying anything on screen, so the
+     bar behaves like the point it has become — and separates again on the way
+     back in. Which side of SPAN_MIN_PX it falls on is the whole test. */
+  {
+    const span = (i, x, wPx, imp = NORMAL) => ({
+      key: "s" + i, id: "s" + i, x1p: x, x2p: x + wPx,
+      t0: BigInt(i * 1000), t1: BigInt(i * 1000 + 500), isSpan: true, imp, cat: "c",
+    });
+    const wide = Array.from({ length: 6 }, (_, i) => span(i, i * 0.3, SPAN_MIN_PX));
+    ok("exactly at the threshold a span is still a bar",
+       clusterPoints(wide).clusters.length === 0);
+    const narrow = Array.from({ length: 6 }, (_, i) => span(i, i * 0.3, SPAN_MIN_PX - 1));
+    const cn = clusterPoints(narrow);
+    ok("one pixel narrower and it merges", cn.clusters.length === 1 && cn.clusters[0].count === 6,
+       JSON.stringify(cn.clusters.map((c) => c.count)));
+
+    /* the importance rule applies to spans exactly as it does to points */
+    const twoLevels = [
+      ...Array.from({ length: 4 }, (_, i) => span(i, i * 0.3, 4, NORMAL)),
+      ...Array.from({ length: 4 }, (_, i) => span(100 + i, 40 + i * 0.3, 4, IMPORTANT)),
+    ];
+    const c2 = clusterPoints(twoLevels);
+    ok("narrow spans cluster by importance level", c2.clusters.length === 2,
+       JSON.stringify(c2.clusters.map((c) => c.imp + ":" + c.count)));
+    ok("a Critical span never merges however narrow",
+       clusterPoints(Array.from({ length: 5 }, (_, i) => span(i, i * 0.3, 2, CRITICAL))).clusters.length === 0);
+
+    /* a narrow span and a point at the same level are indistinguishable, so
+       they merge together rather than into two markers side by side */
+    const mixedKinds = [span(1, 0, 3), mk(2, 1), span(3, 2, 3), mk(4, 3)];
+    const c3 = clusterPoints(mixedKinds);
+    ok("a squeezed span merges with points beside it",
+       c3.clusters.length === 1 && c3.clusters[0].count === 4,
+       JSON.stringify(c3.clusters.map((c) => c.count)));
+
+    /* nothing is ever dropped on the way through */
+    const all = [...wide, ...narrow, ...twoLevels, ...mixedKinds];
+    const c4 = clusterPoints(all);
+    ok("every span is still accounted for",
+       c4.singles.length + c4.clusters.reduce((n, c) => n + c.count, 0) === all.length);
+  }
 
   /* every one of the five levels stays with its own kind */
   const allLevels = [

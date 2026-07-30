@@ -64,10 +64,14 @@ src/
   ui/                               panels, editor, search, etc.
 ```
 
-If you want to change something, `src/App.jsx` is the file that draws the
-timeline and handles clicks and dragging; `src/model.js` is the file that knows
-what an event or an era *is*. Nothing else needs a browser to run — you can
-test the logic with plain Node.js:
+If you want to change something, read **[ARCHITECTURE.md](ARCHITECTURE.md)**
+first — it explains the data model, the render loop, and why several
+non-obvious decisions were made (most of them forced by a bug the obvious
+approach caused).
+
+The short version: `src/App.jsx` draws the timeline and handles clicks and
+dragging; `src/model.js` knows what an event or an era *is*. Nothing else needs
+a browser to run — you can test the logic with plain Node.js:
 
 ```sh
 npm test
