@@ -2,7 +2,7 @@
    preview shown when resting on a pinned picture. */
 import React, { useLayoutEffect, useRef } from "react";
 import { fmtInstant, fmtDur } from "../time.js";
-import { IMP } from "../model.js";
+import { IMP, parentsOf, childrenOf } from "../model.js";
 
 const IMP_TAG = {
   [IMP.CRITICAL]: { text: "★★ Critical", cls: "" },
@@ -48,8 +48,11 @@ export function DetailCard({ item, doc, stage, anchor, preview, rightInset = 0, 
   });
   const dur = item.isSpan && !item.open ? Number(item.t1 - item.t0) : null;
 
-  const parent = isEra && item.parent ? doc.eras.find((r) => r.id === item.parent) : null;
-  const children = isEra ? doc.eras.filter((r) => r.parent === item.id) : [];
+  /* Belonging is derived from the layers, so an era can genuinely have more
+     than one parent: a span crossing the boundary between two eras above sits
+     under both. */
+  const parents = isEra ? parentsOf(doc.eras, item) : [];
+  const children = isEra ? childrenOf(doc.eras, item) : [];
   const within = !isEra
     ? doc.eras
       .filter((r) => r.cat === item.cat && r.start.t <= item.t0 && (!r.end || r.end.t >= item.t0))
@@ -69,7 +72,9 @@ export function DetailCard({ item, doc, stage, anchor, preview, rightInset = 0, 
           <span className="swatch" style={{ background: cat ? cat.color : "#888" }} />
           {cat ? cat.name : "Uncategorised"}
           {tag && <span className={"card-star" + tag.cls} title={tag.text}>{tag.text}</span>}
-          <span className="card-kind">{isEra ? (item.depth ? "Sub-era" : "Era") : item.isSpan ? "Span" : "Point"}</span>
+          <span className="card-kind">
+            {isEra ? "Era · layer " + ((item.layer || 0) + 1) : item.isSpan ? "Span" : "Point"}
+          </span>
         </div>
         <h2 className="card-title" style={{ color }}>{item.title}</h2>
         <div className="card-dates">
@@ -79,8 +84,11 @@ export function DetailCard({ item, doc, stage, anchor, preview, rightInset = 0, 
           <div className="row"><span>Known to</span><b>{item.start.precision}</b></div>
         </div>
         {item.desc && <p className="card-desc">{item.desc}</p>}
-        {parent && (
-          <div className="card-within"><span>Part of</span><em>{parent.title}</em></div>
+        {parents.length > 0 && (
+          <div className="card-within">
+            <span>Part of</span>
+            {parents.map((r) => <em key={r.id}>{r.title}</em>)}
+          </div>
         )}
         {children.length > 0 && (
           <div className="card-within">

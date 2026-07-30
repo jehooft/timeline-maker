@@ -23,6 +23,18 @@ export const STYLES = `
         .app *, .app *::before, .app *::after { box-sizing: border-box; }
         .app input, .app textarea, .app select, .app button { font-family: inherit; }
 
+        /* Scrollbars are drawn from the same variables as everything else, so
+           they follow the theme instead of sitting there as a bright strip of
+           default browser chrome. Firefox takes the standard properties;
+           Chrome and Safari need the -webkit- pseudo-elements. */
+        .app { scrollbar-width: thin; scrollbar-color: var(--rule) transparent; }
+        .app *::-webkit-scrollbar { width: 10px; height: 10px; }
+        .app *::-webkit-scrollbar-track { background: transparent; }
+        .app *::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 6px;
+                                          border: 3px solid transparent; background-clip: content-box; }
+        .app *::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: content-box; }
+        .app *::-webkit-scrollbar-corner { background: transparent; }
+
         .bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px 8px;
                border-bottom: 1px solid var(--faint); flex-wrap: wrap; flex: none; }
         .brand { font: 600 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -110,6 +122,16 @@ export const STYLES = `
           border-radius: 3px; color: var(--text); font-size: 12px; padding: 4px 6px; outline: none; }
         .cat-edit input[type=color] { width: 26px; height: 24px; padding: 0; border: 1px solid var(--rule);
           background: none; border-radius: 3px; cursor: pointer; flex: none; }
+        .cat-layers { display: flex; align-items: center; gap: 6px; padding: 0 10px 10px 26px; }
+        .cat-layers span { font: 9px ui-monospace, monospace; letter-spacing: .1em;
+                           text-transform: uppercase; color: var(--muted); margin-right: auto; }
+        .cat.is-active > .cat-head > .cat-name { color: var(--accent); }
+        .layer-head { display: flex; align-items: center; gap: 6px; padding: 6px 10px 3px 26px; }
+        .layer-head span { font: 8px ui-monospace, monospace; letter-spacing: .14em;
+                           text-transform: uppercase; color: var(--muted); opacity: .75; }
+        .layer-head button { background: none; border: 0; color: var(--muted); cursor: pointer;
+                             font-size: 9px; padding: 2px 4px; border-radius: 2px; }
+        .layer-head button:hover { color: var(--danger); background: var(--ink-2); }
 
         .cat-items { padding: 0 0 8px 0; }
         .item { display: flex; align-items: center; }
@@ -182,6 +204,15 @@ export const STYLES = `
         .sw-auto { position: relative; opacity: .55; }
         .sw-custom { width: 24px; height: 24px; padding: 0; border: 1px solid var(--rule);
                      background: none; border-radius: 3px; cursor: pointer; }
+        .sw.saved { border-style: dashed; }
+        .sw.saved.on { border-style: solid; }
+        .sw-add { color: var(--muted); font: 14px/1 ui-monospace, monospace; padding: 0;
+                  display: flex; align-items: center; justify-content: center; }
+        .sw-add:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+        .sw-add:disabled { opacity: .3; cursor: default; }
+        .layerrow { display: flex; gap: 6px; align-items: center; }
+        .layerrow select { flex: 1; min-width: 0; }
+        .layerrow .btn { flex: none; white-space: nowrap; }
 
         .filebtn { display: inline-block; background: var(--ink); border: 1px dashed var(--rule);
                    border-radius: 3px; padding: 10px 12px; cursor: pointer; width: 100%;

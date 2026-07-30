@@ -5,12 +5,12 @@ import { parseDateInput, fmtInstant, nowT } from "../time.js";
 import { SYMBOL_KEYS, SymbolChip } from "../symbols.jsx";
 import { IMAGE_MAX } from "../images.js";
 import {
-  PALETTE, descendantsOf, siblingClash, escapesParent, containedSiblings, IMP, IMP_LEVELS,
+  PALETTE, siblingClash, IMP, IMP_LEVELS, layersOf, parentsOf,
 } from "../model.js";
 
 /* ----------------------------------------------------------------- the editor */
 export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickImage,
-  onLinkImage, onClearImage }) {
+  onLinkImage, onClearImage, customColors = [], onAddColor, onRemoveColor, onAddLayer }) {
   const [confirming, setConfirming] = useState(false);
   const [urlDraft, setUrlDraft] = useState("");
   const [urlOpen, setUrlOpen] = useState(false);
@@ -23,23 +23,20 @@ export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickI
   const image = draft.imageId ? doc.images[draft.imageId] : null;
   const cat = doc.categories.find((c) => c.id === draft.cat);
 
-  /* Live era-tree checks */
-  let clash = null, escapes = null, adoptable = null, parentOptions = [];
-  if (isEra) {
-    const blocked = draft.id ? descendantsOf(doc.eras, draft.id) : new Set();
-    parentOptions = doc.eras.filter((r) => r.cat === draft.cat && !blocked.has(r.id));
-    if (startParse) {
-      const candidate = {
-        id: draft.id || "__new__", cat: draft.cat, parent: draft.parent || null,
-        start: startParse, end: endBlank ? null : endParse,
-      };
-      if (endBlank || (endParse && order)) {
-        clash = siblingClash(doc.eras, candidate);
-        escapes = escapesParent(doc.eras, candidate);
-        /* An overlap that is really containment has a second way out: this era
-           is the broader one, so it can take the eras it covers as children. */
-        if (clash) adoptable = containedSiblings(doc.eras, candidate);
-      }
+  /* Live layer checks */
+  const layerCount = isEra ? layersOf(doc, draft.cat) : 1;
+  let clash = null, parents = [], orphan = false;
+  if (isEra && startParse) {
+    const candidate = {
+      id: draft.id || "__new__", cat: draft.cat, layer: draft.layer || 0,
+      start: startParse, end: endBlank ? null : endParse,
+    };
+    if (endBlank || (endParse && order)) {
+      clash = siblingClash(doc.eras, candidate);
+      parents = parentsOf(doc.eras, candidate);
+      /* Sitting below a layer that has nothing covering this span is allowed —
+         it just means the era has no family to fold away with. */
+      orphan = (draft.layer || 0) > 0 && parents.length === 0;
     }
   }
 
@@ -77,20 +74,41 @@ export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickI
 
         <label className="fld">
           <span>Category</span>
-          <select value={draft.cat} onChange={(e) => { onField("cat", e.target.value); if (isEra) onField("parent", ""); }}>
+          <select value={draft.cat} onChange={(e) => { onField("cat", e.target.value); if (isEra) onField("layer", 0); }}>
             {doc.categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
         </label>
 
         {isEra && (
-          <label className="fld">
-            <span>Within <i>optional</i></span>
-            <select value={draft.parent || ""} onChange={(e) => onField("parent", e.target.value)}>
-              <option value="">Top level</option>
-              {parentOptions.map((r) => <option key={r.id} value={r.id}>{r.title}</option>)}
-            </select>
-            <em className="hint">Nest an era to let it overlap another in the same category.</em>
-          </label>
+          <div className="fld">
+            <span>Layer</span>
+            <div className="layerrow">
+              <select value={draft.layer || 0}
+                onChange={(e) => onField("layer", parseInt(e.target.value, 10))}>
+                {Array.from({ length: layerCount }, (_, i) => (
+                  <option key={i} value={i}>
+                    {i === 0 ? "Layer 1 — broadest" : "Layer " + (i + 1)}
+                  </option>
+                ))}
+              </select>
+              <button type="button" className="btn small" title="Insert a new layer above this one"
+                onClick={() => { onAddLayer(draft.cat, draft.layer || 0); onField("layer", draft.layer || 0); }}>
+                ↑ Layer
+              </button>
+              <button type="button" className="btn small" title="Insert a new layer below this one"
+                onClick={() => { onAddLayer(draft.cat, (draft.layer || 0) + 1); onField("layer", (draft.layer || 0) + 1); }}>
+                ↓ Layer
+              </button>
+            </div>
+            <em className="hint">
+              {parents.length
+                ? "Sits under " + parents.map((r) => r.title).join(", ") + "."
+                : (draft.layer || 0) === 0
+                  ? "The top layer — nothing above it, so it never folds away."
+                  : "Nothing on the layer above covers this span yet."}
+              {" "}Eras on different layers may overlap freely; eras sharing one may not.
+            </em>
+          </div>
         )}
 
         <label className="fld">
@@ -136,30 +154,16 @@ export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickI
           </p>
         )}
 
-        {clash && adoptable && (
+        {clash && (
           <div className="notice warn">
-            This era covers {adoptable.length === 1
-              ? <b>{adoptable[0].title}</b>
-              : <><b>{adoptable.length} eras</b> at the same level ({adoptable.map((r) => r.title).join(", ")})</>}
-            . Eras side by side may not overlap, but a broader era can hold {adoptable.length === 1 ? "it" : "them"}.
+            Overlaps <b>{clash.title}</b> on the same layer. Eras sharing a layer may touch
+            but not overlap — put this one on its own layer, or change the dates so they
+            only meet at the edge.
             <button className="btn small" style={{ marginTop: 9, display: "block" }}
-              onClick={() => onSave(adoptable.map((r) => r.id))}>
-              Nest {adoptable.length === 1 ? "it" : "them"} inside this era
+              onClick={() => onSave(true)}>
+              Put it on a new layer above
             </button>
           </div>
-        )}
-        {clash && !adoptable && (
-          <p className="notice bad">
-            Overlaps <b>{clash.title}</b>, which sits at the same level.
-            Eras side by side may touch but not overlap — set “Within” to nest this one instead,
-            or change the dates so they only meet at the edge.
-          </p>
-        )}
-        {!clash && escapes && (
-          <p className="notice warn">
-            Reaches outside <b>{escapes.title}</b>. That still draws, but a sub-era normally
-            stays inside the era that contains it.
-          </p>
         )}
 
         {!isEra && (
@@ -217,8 +221,22 @@ export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickI
                 <span style={{ background: c }} />
               </button>
             ))}
+            {/* Kept colours sit alongside the built-in ones; right-click drops
+                one again, so the row cannot silently fill up for good. */}
+            {customColors.map((c) => (
+              <button key={c} type="button" className={"sw saved" + (draft.color === c ? " on" : "")}
+                onClick={() => onField("color", c)}
+                onContextMenu={(e) => { e.preventDefault(); onRemoveColor(c); }}
+                title={c + " — right-click to forget"}>
+                <span style={{ background: c }} />
+              </button>
+            ))}
             <input type="color" className="sw-custom" value={draft.color || (cat ? cat.color : "#888888")}
-              onChange={(e) => onField("color", e.target.value)} title="Custom colour" />
+              onChange={(e) => onField("color", e.target.value)} title="Mix a colour" />
+            <button type="button" className="sw sw-add"
+              disabled={!draft.color || PALETTE.includes(draft.color) || customColors.includes(draft.color)}
+              onClick={() => onAddColor(draft.color)}
+              title="Keep this colour in the palette">+</button>
           </div>
         </div>
 

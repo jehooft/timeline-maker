@@ -8,7 +8,7 @@
    Everything else (encode/decode, the library, garbage collection, CSV/JSON
    export) is identical to the Claude build. */
 
-import { IMP } from "./model.js";
+import { IMP, erasWithLayers } from "./model.js";
 
 const PREFIX = "timeline-maker:";
 
@@ -100,7 +100,9 @@ export function decodeDoc(raw) {
     id: raw.id, name: raw.name || "Untitled",
     createdAt: raw.createdAt, updatedAt: raw.updatedAt,
     categories: (raw.categories || []).map((c) => ({ ...c })),
-    eras: (raw.eras || []).map((r) => ({ ...r, start: decDate(r.start), end: decDate(r.end) })),
+    /* `parent` pointers from before layers existed are converted here, so the
+       rest of the app only ever sees `layer`. */
+    eras: erasWithLayers((raw.eras || []).map((r) => ({ ...r, start: decDate(r.start), end: decDate(r.end) }))),
     events: (raw.events || []).map(migrateEvent),
     images: raw.images || {},
   };

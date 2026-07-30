@@ -9,7 +9,7 @@ import { parseDateInput, instantToInput, nowT } from "./time.js";
 import { uid, PALETTE, IMP, IMP_LEVELS } from "./model.js";
 import { externalImage } from "./images.js";
 
-export const CSV_COLUMNS = ["type", "title", "start", "end", "category", "parent",
+export const CSV_COLUMNS = ["type", "title", "start", "end", "category", "layer",
   "symbol", "color", "description", "image", "pin_image", "importance", "precision",
   "link", "tags", "id"];
 
@@ -141,9 +141,16 @@ export function importCSV(text, doc) {
     if (item.imageId && truthy(col(r, "pin_image"))) item.pinImage = true;
 
     if (isEra) {
-      const p = col(r, "parent");
-      if (p) pendingParents.push([item, p, cat.id]);
-      item.parent = null;
+      const layerRaw = col(r, "layer");
+      if (layerRaw !== "" && Number.isFinite(parseInt(layerRaw, 10))) {
+        item.layer = Math.max(0, parseInt(layerRaw, 10));
+      } else {
+        /* A file written before layers existed names a parent era instead.
+           Resolved after every row is read, since it may appear further down. */
+        const p = col(r, "parent");
+        item.layer = 0;
+        if (p) pendingParents.push([item, p, cat.id]);
+      }
       eras.push(item);
     } else {
       item.sym = col(r, "symbol") || "dot";
@@ -159,14 +166,29 @@ export function importCSV(text, doc) {
     }
   });
 
-  /* parents may be given by id or by title, and may appear later in the file */
-  for (const [item, ref, catId] of pendingParents) {
-    const match = eras.find((r) => r.id === ref)
+  /* Legacy `parent` column: a named parent just means "one layer below that
+     era". Resolved iteratively so a chain of parents settles whatever order the
+     rows arrived in. Parents may be given by id or by title. */
+  if (pendingParents.length) {
+    const findEra = (ref, catId) => eras.find((r) => r.id === ref)
       || eras.find((r) => r.cat === catId && r.title.toLowerCase() === ref.toLowerCase())
-      || doc.eras.find((r) => r.id === ref)
-      || doc.eras.find((r) => r.cat === catId && r.title.toLowerCase() === ref.toLowerCase());
-    if (match) item.parent = match.id;
-    else errors.push('Cannot find an era called "' + ref + '" to nest "' + item.title + '" inside');
+      || (doc.eras || []).find((r) => r.id === ref)
+      || (doc.eras || []).find((r) => r.cat === catId && r.title.toLowerCase() === ref.toLowerCase());
+    for (const [item, ref, catId] of pendingParents) {
+      if (!findEra(ref, catId)) {
+        errors.push('Cannot find an era called "' + ref + '" to put "' + item.title + '" under');
+      }
+    }
+    for (let pass = 0; pass < 8; pass++) {
+      let moved = false;
+      for (const [item, ref, catId] of pendingParents) {
+        const match = findEra(ref, catId);
+        if (!match) continue;
+        const want = ((match.layer || 0) + 1);
+        if (item.layer !== want) { item.layer = want; moved = true; }
+      }
+      if (!moved) break;
+    }
   }
 
   return { categories, events, eras, images, errors };
@@ -190,7 +212,6 @@ export const countsDroppedImages = (doc) =>
 
 export function exportCSV(doc) {
   const catName = new Map(doc.categories.map((c) => [c.id, c.name]));
-  const eraTitle = new Map(doc.eras.map((r) => [r.id, r.title]));
   const lines = [CSV_COLUMNS.join(",")];
 
   const row = (it, type) => lines.push([
@@ -201,7 +222,7 @@ export function exportCSV(doc) {
        as blank, since blank has meant "open" for eras from the start. */
     it.end ? instantToInput(it.end.t, it.end.precision) : (type === "event" && it.ongoing ? "ongoing" : ""),
     catName.get(it.cat) || "",
-    type === "era" && it.parent ? eraTitle.get(it.parent) || "" : "",
+    type === "era" ? String(it.layer || 0) : "",
     type === "event" ? it.sym || "dot" : "",
     it.color || "",
     it.desc || "",

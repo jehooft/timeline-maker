@@ -1,6 +1,6 @@
 /* Round-trip tests for persistence and interchange. Data loss here is silent,
    so every field is compared, not just the count of items. */
-import { starterDoc, buildIndex, siblingClash } from "./src/model.js";
+import { starterDoc, buildIndex, siblingClash, parentsOf } from "./src/model.js";
 import { encodeDoc, decodeDoc, summarise } from "./src/storage.js";
 import { importCSV, exportCSV, parseCSV, countsDroppedImages } from "./src/csv.js";
 import { fmtInstant } from "./src/time.js";
@@ -85,19 +85,24 @@ const doc = { ...starterDoc(), id: "tl_1", createdAt: "2026-01-01T00:00:00Z" };
   }
   ok("CSV round-trips every instant and field", drift.length === 0, drift.slice(0, 4).join(" | "));
 
-  /* the era hierarchy has to survive being flattened into a table */
-  const nameOf = new Map(res.eras.map(r => [r.id, r.title]));
-  const srcName = new Map(doc.eras.map(r => [r.id, r.title]));
+  /* the layer stack has to survive being flattened into a table */
   let tree = [];
   for (const src of doc.eras) {
     const got = res.eras.find(r => r.id === src.id);
-    const wanted = src.parent ? srcName.get(src.parent) : null;
-    const actual = got.parent ? nameOf.get(got.parent) : null;
-    if (wanted !== actual) tree.push(src.title + ": wanted " + wanted + ", got " + actual);
+    if ((got.layer || 0) !== (src.layer || 0)) {
+      tree.push(src.title + ": wanted layer " + src.layer + ", got " + got.layer);
+    }
   }
-  ok("CSV preserves the era tree", tree.length === 0, tree.slice(0, 3).join(" | "));
-  ok("CSV era tree still validates",
+  ok("CSV preserves every era's layer", tree.length === 0, tree.slice(0, 3).join(" | "));
+  ok("and the layers still validate",
      res.eras.filter(r => siblingClash(res.eras, r)).length === 0);
+  /* parentage is derived, so it has to come back identical without being stored */
+  ok("derived parentage survives the round trip",
+     doc.eras.every((src) => {
+       const a = parentsOf(doc.eras, src).map(r => r.id).sort().join();
+       const b = parentsOf(res.eras, res.eras.find(r => r.id === src.id)).map(r => r.id).sort().join();
+       return a === b;
+     }));
 }
 
 /* ---- 4. the CSV parser itself ---- */
@@ -126,8 +131,11 @@ const doc = { ...starterDoc(), id: "tl_1", createdAt: "2026-01-01T00:00:00Z" };
   ok("hand-written CSV imports cleanly", res.errors.length === 0, res.errors.join(" | "));
   ok("creates categories it has not seen", res.categories.length === 2,
      res.categories.map(c => c.name).join(","));
-  ok("nests by parent title", res.eras.find(r => r.title === "Bronze Age").parent
-     === res.eras.find(r => r.title === "Ancient").id);
+  /* the legacy `parent` column still reads: a named parent just means one
+     layer below whatever it names */
+  ok("a named parent puts the era one layer down",
+     res.eras.find(r => r.title === "Bronze Age").layer
+     === res.eras.find(r => r.title === "Ancient").layer + 1);
   ok("reads BCE dates", fmtInstant(res.eras[0].start.t, "year") === "3000 BCE",
      fmtInstant(res.eras[0].start.t, "year"));
   ok("reads deep time", res.events.find(e => e.title === "Deep one").start.precision === "myr");
@@ -293,6 +301,61 @@ const doc = { ...starterDoc(), id: "tl_1", createdAt: "2026-01-01T00:00:00Z" };
   ok("important:false becomes unset (Normal by default)", migrated.events[1].imp === undefined);
   ok("no flag at all stays unset too", migrated.events[2].imp === undefined);
   ok("the legacy field itself is gone", !("important" in migrated.events[0]));
+}
+
+/* ---- 11. era layers through JSON, including the legacy tree ---- */
+{
+  const doc4 = { ...starterDoc(), id: "tl_lay", createdAt: "2026-01-01T00:00:00Z" };
+  const back = decodeDoc(JSON.parse(JSON.stringify(encodeDoc(doc4))));
+  ok("layers round-trip", doc4.eras.every((src) =>
+    back.eras.find((r) => r.id === src.id).layer === src.layer));
+
+  /* a timeline saved before layers existed, carrying parent pointers */
+  const legacy = { format: "timeline-doc", version: 1, id: "tl_old",
+    categories: [{ id: "c", name: "C", color: "#fff" }], events: [],
+    eras: [
+      { id: "p", cat: "c", parent: null, title: "Top",
+        start: { t: "0", precision: "year" }, end: { t: "1000", precision: "year" } },
+      { id: "m", cat: "c", parent: "p", title: "Middle",
+        start: { t: "100", precision: "year" }, end: { t: "400", precision: "year" } },
+      { id: "j", cat: "c", parent: "m", title: "Deep",
+        start: { t: "150", precision: "year" }, end: { t: "300", precision: "year" } },
+    ] };
+  const conv = decodeDoc(legacy);
+  ok("loading an old document assigns layers", conv.eras.map((r) => r.id + ":" + r.layer).join() === "p:0,m:1,j:2",
+     conv.eras.map((r) => r.id + ":" + r.layer).join());
+  ok("and drops the old pointers", conv.eras.every((r) => !("parent" in r)));
+  ok("parentage still comes out the same",
+     parentsOf(conv.eras, conv.eras.find((r) => r.id === "j")).map((r) => r.id).join() === "m");
+}
+
+/* ---- 12. the CSV layer column ---- */
+{
+  const csv = [
+    "type,title,start,end,category,layer",
+    "era,Broad,1000,2000,Hist,0",
+    "era,Narrow,1200,1500,Hist,1",
+    "era,Also narrow,1500,1800,Hist,1",
+  ].join("\n");
+  const res = importCSV(csv, { categories: [], events: [], eras: [] });
+  ok("layers import cleanly", res.errors.length === 0, res.errors.join(" | "));
+  ok("the layer column is read", res.eras.map((r) => r.layer).join() === "0,1,1");
+  ok("parentage falls out of the layers",
+     parentsOf(res.eras, res.eras.find((r) => r.title === "Narrow")).map((r) => r.title).join() === "Broad");
+
+  /* export writes the number back, and it survives a second trip */
+  const doc5 = { categories: res.categories, eras: res.eras, events: [], images: {}, name: "L" };
+  const back2 = importCSV(exportCSV(doc5), { categories: [], events: [], eras: [] });
+  ok("layers survive an export/import round trip",
+     back2.eras.map((r) => r.layer).sort().join() === "0,1,1",
+     back2.eras.map((r) => r.title + ":" + r.layer).join());
+
+  /* eras sharing a layer may not overlap, but different layers may */
+  const narrow = res.eras.find((r) => r.title === "Narrow");
+  const rival = { id: "x", cat: narrow.cat, layer: 1, start: narrow.start, end: narrow.end };
+  ok("a same-layer overlap is still a clash", siblingClash(res.eras, rival) !== null);
+  ok("the very same span on another layer is free",
+     siblingClash(res.eras, { ...rival, layer: 3 }) === null);
 }
 
 console.log("\n" + pass + " passed, " + fail + " failed");

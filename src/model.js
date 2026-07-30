@@ -29,47 +29,49 @@ export const IMP_LEVELS = [
 ];
 export const impOf = (it) => (typeof it.imp === "number" ? it.imp : IMP.NORMAL);
 
-/* Eras form a tree per category. Siblings must not overlap; a child sits inside
-   its parent. Depth becomes a row in the band's era strip, and every era tints
-   the band background beneath it. */
+/* Eras live in layers per category, numbered from 0 at the top. An era says
+   which layer it is in; which era it belongs to is *derived* from overlap with
+   the layer above rather than stored. Layer becomes a row in the band's era
+   strip, and every era tints the band background beneath it. */
 export function starterDoc() {
-  const era = (id, cat, parent, title, start, end, color, desc) =>
-    ({ id, cat, parent, title, start, end, color, desc });
+  const era = (id, cat, layer, title, start, end, color, desc) =>
+    ({ id, cat, layer, title, start, end, color, desc });
   return {
     name: "A short history of everything",
     categories: [
-      { id: "vg", name: "Videogaming", color: "#4E92C8" },
-      { id: "hist", name: "Broad History", color: "#A184C4" },
-      { id: "earth", name: "Earth & Life", color: "#5FA97C" },
+      { id: "vg", name: "Videogaming", color: "#4E92C8", layers: 2 },
+      { id: "hist", name: "Broad History", color: "#A184C4", layers: 2 },
+      { id: "earth", name: "Earth & Life", color: "#5FA97C", layers: 3 },
     ],
     eras: [
-      /* Videogaming — three sequential top-level eras, one with sub-eras */
-      era("r_arc", "vg", null, "The Age of Arcade", D(tFromCivil(1972, 1, 1), "year"), D(tFromCivil(1983, 1, 1), "year"), "#3E7CB1", "Coin-operated machines dominate, from Pong to the American crash."),
-      era("r_con", "vg", null, "The Age of the Console", D(tFromCivil(1983, 1, 1), "year"), D(tFromCivil(2003, 1, 1), "year"), "#4E92C8", "Play moves into the living room. Begins exactly where the arcade era ends, so the two bars meet."),
-      era("r_net", "vg", null, "The Networked Age", D(tFromCivil(2003, 1, 1), "year"), null, "#6FB0DC", "Digital distribution and always-online play. No end date, so it runs to the edge of the view."),
-      era("r_8bit", "vg", "r_con", "8-bit", D(tFromCivil(1983, 1, 1), "year"), D(tFromCivil(1990, 1, 1), "year"), "#5FA9D8", ""),
-      era("r_16bit", "vg", "r_con", "16-bit", D(tFromCivil(1990, 1, 1), "year"), D(tFromCivil(1995, 1, 1), "year"), "#5FA9D8", ""),
-      era("r_3d", "vg", "r_con", "3D", D(tFromCivil(1995, 1, 1), "year"), D(tFromCivil(2003, 1, 1), "year"), "#5FA9D8", ""),
+      /* Videogaming — three sequential eras on the top layer, one of which the
+         layer below subdivides */
+      era("r_arc", "vg", 0, "The Age of Arcade", D(tFromCivil(1972, 1, 1), "year"), D(tFromCivil(1983, 1, 1), "year"), "#3E7CB1", "Coin-operated machines dominate, from Pong to the American crash."),
+      era("r_con", "vg", 0, "The Age of the Console", D(tFromCivil(1983, 1, 1), "year"), D(tFromCivil(2003, 1, 1), "year"), "#4E92C8", "Play moves into the living room. Begins exactly where the arcade era ends, so the two bars meet."),
+      era("r_net", "vg", 0, "The Networked Age", D(tFromCivil(2003, 1, 1), "year"), null, "#6FB0DC", "Digital distribution and always-online play. No end date, so it fades out past today."),
+      era("r_8bit", "vg", 1, "8-bit", D(tFromCivil(1983, 1, 1), "year"), D(tFromCivil(1990, 1, 1), "year"), "#5FA9D8", ""),
+      era("r_16bit", "vg", 1, "16-bit", D(tFromCivil(1990, 1, 1), "year"), D(tFromCivil(1995, 1, 1), "year"), "#5FA9D8", ""),
+      era("r_3d", "vg", 1, "3D", D(tFromCivil(1995, 1, 1), "year"), D(tFromCivil(2003, 1, 1), "year"), "#5FA9D8", ""),
 
       /* Broad History */
-      era("r_ant", "hist", null, "Classical antiquity", D(tFromCivil(-799, 1, 1), "year"), D(tFromCivil(476, 1, 1), "year"), "#8B72AE", "Conventional bounds for the Greco-Roman world."),
-      era("r_mid", "hist", null, "Middle Ages", D(tFromCivil(476, 1, 1), "year"), D(tFromCivil(1453, 1, 1), "year"), "#A184C4", ""),
-      era("r_emo", "hist", null, "Early modern", D(tFromCivil(1453, 1, 1), "year"), D(tFromCivil(1800, 1, 1), "year"), "#B99AD6", ""),
-      era("r_mod", "hist", null, "Modern", D(tFromCivil(1800, 1, 1), "year"), null, "#C9AEE2", ""),
-      era("r_ind", "hist", "r_mod", "Industrial", D(tFromCivil(1800, 1, 1), "year"), D(tFromCivil(1914, 1, 1), "year"), "#C9AEE2", ""),
-      era("r_inf", "hist", "r_mod", "Information", D(tFromCivil(1947, 1, 1), "year"), null, "#C9AEE2", "Siblings may leave gaps between them — they just may not overlap."),
+      era("r_ant", "hist", 0, "Classical antiquity", D(tFromCivil(-799, 1, 1), "year"), D(tFromCivil(476, 1, 1), "year"), "#8B72AE", "Conventional bounds for the Greco-Roman world."),
+      era("r_mid", "hist", 0, "Middle Ages", D(tFromCivil(476, 1, 1), "year"), D(tFromCivil(1453, 1, 1), "year"), "#A184C4", ""),
+      era("r_emo", "hist", 0, "Early modern", D(tFromCivil(1453, 1, 1), "year"), D(tFromCivil(1800, 1, 1), "year"), "#B99AD6", ""),
+      era("r_mod", "hist", 0, "Modern", D(tFromCivil(1800, 1, 1), "year"), null, "#C9AEE2", ""),
+      era("r_ind", "hist", 1, "Industrial", D(tFromCivil(1800, 1, 1), "year"), D(tFromCivil(1914, 1, 1), "year"), "#C9AEE2", ""),
+      era("r_inf", "hist", 1, "Information", D(tFromCivil(1947, 1, 1), "year"), null, "#C9AEE2", "Eras on one layer may leave gaps between them — they just may not overlap."),
 
-      /* Earth & Life — three levels deep */
-      era("r_had", "earth", null, "Hadean", D(agoY(4.54e9), "gyr"), D(agoY(4.0e9), "gyr"), "#7A6A55", ""),
-      era("r_arch", "earth", null, "Archean", D(agoY(4.0e9), "gyr"), D(agoY(2.5e9), "gyr"), "#8E6F5E", ""),
-      era("r_prot", "earth", null, "Proterozoic", D(agoY(2.5e9), "gyr"), D(agoY(538.8e6), "myr"), "#A67C52", ""),
-      era("r_phan", "earth", null, "Phanerozoic", D(agoY(538.8e6), "myr"), null, "#5FA97C", "The eon of visible life."),
-      era("r_pal", "earth", "r_phan", "Paleozoic", D(agoY(538.8e6), "myr"), D(agoY(251.9e6), "myr"), "#6FA88C", ""),
-      era("r_mes", "earth", "r_phan", "Mesozoic", D(agoY(251.9e6), "myr"), D(agoY(66e6), "myr"), "#7FB88C", ""),
-      era("r_cen", "earth", "r_phan", "Cenozoic", D(agoY(66e6), "myr"), null, "#8FC89C", ""),
-      era("r_tri", "earth", "r_mes", "Triassic", D(agoY(251.9e6), "myr"), D(agoY(201.4e6), "myr"), "#9ACBA6", ""),
-      era("r_jur", "earth", "r_mes", "Jurassic", D(agoY(201.4e6), "myr"), D(agoY(145e6), "myr"), "#9ACBA6", ""),
-      era("r_cre", "earth", "r_mes", "Cretaceous", D(agoY(145e6), "myr"), D(agoY(66e6), "myr"), "#9ACBA6", ""),
+      /* Earth & Life — three layers deep */
+      era("r_had", "earth", 0, "Hadean", D(agoY(4.54e9), "gyr"), D(agoY(4.0e9), "gyr"), "#7A6A55", ""),
+      era("r_arch", "earth", 0, "Archean", D(agoY(4.0e9), "gyr"), D(agoY(2.5e9), "gyr"), "#8E6F5E", ""),
+      era("r_prot", "earth", 0, "Proterozoic", D(agoY(2.5e9), "gyr"), D(agoY(538.8e6), "myr"), "#A67C52", ""),
+      era("r_phan", "earth", 0, "Phanerozoic", D(agoY(538.8e6), "myr"), null, "#5FA97C", "The eon of visible life."),
+      era("r_pal", "earth", 1, "Paleozoic", D(agoY(538.8e6), "myr"), D(agoY(251.9e6), "myr"), "#6FA88C", ""),
+      era("r_mes", "earth", 1, "Mesozoic", D(agoY(251.9e6), "myr"), D(agoY(66e6), "myr"), "#7FB88C", ""),
+      era("r_cen", "earth", 1, "Cenozoic", D(agoY(66e6), "myr"), null, "#8FC89C", ""),
+      era("r_tri", "earth", 2, "Triassic", D(agoY(251.9e6), "myr"), D(agoY(201.4e6), "myr"), "#9ACBA6", ""),
+      era("r_jur", "earth", 2, "Jurassic", D(agoY(201.4e6), "myr"), D(agoY(145e6), "myr"), "#9ACBA6", ""),
+      era("r_cre", "earth", 2, "Cretaceous", D(agoY(145e6), "myr"), D(agoY(66e6), "myr"), "#9ACBA6", ""),
     ],
     events: [
       { id: "e1", cat: "vg", title: "Pong released", sym: "square", start: D(tFromCivil(1972, 11, 29), "day"), end: null, desc: "Atari's coin-op table tennis game reaches arcades and effectively starts the commercial industry.", tags: ["atari", "arcade"] },
@@ -105,84 +107,88 @@ export function starterDoc() {
   };
 }
 
-/* ------------------------------------------------------------- the era tree */
+/* ---------------------------------------------------------------- era layers
+
+   Eras used to carry a `parent` pointer, which made adding a broader era over
+   existing ones an awkward, explicit re-parenting step. Now a category owns a
+   stack of layers, numbered from 0 at the top, and an era only says which layer
+   it is in. Belonging is *derived*: an era's parents are whichever eras on the
+   layer directly above it overlap its span. Nothing has to be re-pointed when a
+   layer is inserted — put "Phanerozoic" on a new top layer and the eras below
+   become its children by virtue of sitting under it.
+
+   Two consequences the old tree could not express: an era may have several
+   parents (a span crossing the boundary between two eras above belongs to
+   both), and eras on *different* layers may freely overlap. Only eras sharing
+   a layer may not. */
 
 export const eraStart = (r) => r.start.t;
 export const eraEnd = (r) => (r.end ? r.end.t : MAX_T);
+export const eraLayer = (r) => r.layer || 0;
+export const erasOverlap = (a, b) => eraStart(a) < eraEnd(b) && eraStart(b) < eraEnd(a);
 
-export function eraDepth(era, byId, guard = 0) {
-  if (!era || !era.parent || guard > 16) return 0;
-  const p = byId.get(era.parent);
-  if (!p) return 0;
-  return 1 + eraDepth(p, byId, guard + 1);
+/* How many layers a category has. Stored on the category once the user adds
+   one, but always at least enough to hold the eras that exist — so a document
+   that predates the setting still reads correctly. */
+export function layersOf(doc, catId) {
+  const cat = (doc.categories || []).find((c) => c.id === catId);
+  let n = cat && typeof cat.layers === "number" ? cat.layers : 0;
+  for (const r of doc.eras || []) if (r.cat === catId) n = Math.max(n, eraLayer(r) + 1);
+  return Math.max(1, n);
 }
 
-/* Every era that would be orphaned or cyclic if `id` became the parent. */
-export function descendantsOf(eras, id) {
-  const out = new Set([id]);
-  let grew = true;
-  while (grew) {
-    grew = false;
-    for (const r of eras) {
-      if (!out.has(r.id) && r.parent && out.has(r.parent)) { out.add(r.id); grew = true; }
-    }
-  }
-  return out;
+/* The eras directly above this one that cover any part of it. Empty for
+   anything on the top layer, and for an era with a gap above it. */
+export function parentsOf(eras, era) {
+  const L = eraLayer(era);
+  if (L <= 0) return [];
+  return eras.filter((r) => r.cat === era.cat && eraLayer(r) === L - 1 && erasOverlap(r, era));
+}
+export function childrenOf(eras, era) {
+  const L = eraLayer(era);
+  return eras.filter((r) => r.cat === era.cat && eraLayer(r) === L + 1 && erasOverlap(r, era));
 }
 
-/* Siblings may touch end-to-start, but may not overlap. Returns the clash. */
+/* Eras sharing a layer may touch end-to-start, but may not overlap. Different
+   layers are free to overlap however they like. Returns the clash. */
 export function siblingClash(eras, candidate) {
-  const a0 = eraStart(candidate), a1 = eraEnd(candidate);
-  const parent = candidate.parent || null;
+  const L = eraLayer(candidate);
   for (const r of eras) {
     if (r.id === candidate.id) continue;
     if (r.cat !== candidate.cat) continue;
-    if ((r.parent || null) !== parent) continue;
-    if (a0 < eraEnd(r) && eraStart(r) < a1) return r;
+    if (eraLayer(r) !== L) continue;
+    if (erasOverlap(r, candidate)) return r;
   }
   return null;
 }
 
-/* Siblings the candidate completely swallows.
-
-   An overlap is only ever reported by `siblingClash`, which offers no way out
-   except nesting the *new* era under an existing one. That is backwards when
-   the era being added is the broader of the two — adding "Phanerozoic" once
-   "Mesozoic" already sits at the top level had no resolution at all. So:
-   overlap purely by containment is resolvable in the other direction, by
-   adopting the eras it covers as children.
-
-   Returns the covered siblings, or null when any overlap is partial — a
-   candidate that runs through the middle of a sibling is a genuine conflict
-   that nesting cannot express, and must still be refused. */
-export function containedSiblings(eras, candidate) {
-  const a0 = eraStart(candidate), a1 = eraEnd(candidate);
-  const parent = candidate.parent || null;
-  const out = [];
-  for (const r of eras) {
-    if (r.id === candidate.id) continue;
-    if (r.cat !== candidate.cat) continue;
-    if ((r.parent || null) !== parent) continue;
-    if (a0 < eraEnd(r) && eraStart(r) < a1) {
-      if (a0 <= eraStart(r) && eraEnd(r) <= a1) out.push(r);
-      else return null;                     // partial overlap: not resolvable
-    }
-  }
-  return out.length ? out : null;
+/* Opening a gap in the stack: everything at or below `at` drops one layer, so
+   the freed layer can take the new era. This is the whole re-parenting story
+   now — the eras that were on `at` become children of whatever lands above
+   them, without a single pointer being rewritten. */
+export function insertLayer(eras, catId, at) {
+  return eras.map((r) => (r.cat === catId && eraLayer(r) >= at ? { ...r, layer: eraLayer(r) + 1 } : r));
 }
 
-/* A soft check: a sub-era normally sits inside the era that contains it. */
-export function escapesParent(eras, candidate) {
-  if (!candidate.parent) return null;
-  const p = eras.find((r) => r.id === candidate.parent);
-  if (!p) return null;
-  if (eraStart(candidate) < eraStart(p) || eraEnd(candidate) > eraEnd(p)) return p;
-  return null;
+/* Documents written before layers existed carry `parent` instead. Depth in the
+   old tree is exactly the layer number, so the conversion is lossless. */
+export function erasWithLayers(eras) {
+  if (!eras || eras.every((r) => typeof r.layer === "number")) return eras;
+  const byId = new Map(eras.map((r) => [r.id, r]));
+  const depth = (r, guard = 0) => {
+    if (!r || !r.parent || guard > 16) return 0;
+    const p = byId.get(r.parent);
+    return p ? 1 + depth(p, guard + 1) : 0;
+  };
+  return eras.map((r) => {
+    const out = { ...r, layer: typeof r.layer === "number" ? r.layer : depth(r) };
+    delete out.parent;
+    return out;
+  });
 }
 
 /* --------------------------------------------------------------- the index */
 export function buildIndex(doc) {
-  const byId = new Map(doc.eras.map((r) => [r.id, r]));
   const items = [];
   for (const e of doc.events) {
     /* An event is a point unless it has an end, or is explicitly marked as
@@ -194,7 +200,7 @@ export function buildIndex(doc) {
       t1: e.end ? e.end.t : (open ? MAX_T : e.start.t), isSpan, open });
   }
   for (const r of doc.eras) {
-    items.push({ ...r, kind: "era", depth: eraDepth(r, byId), t0: eraStart(r), t1: eraEnd(r), open: !r.end, isSpan: true });
+    items.push({ ...r, kind: "era", depth: eraLayer(r), t0: eraStart(r), t1: eraEnd(r), open: !r.end, isSpan: true });
   }
   items.sort((a, b) => (a.t0 < b.t0 ? -1 : a.t0 > b.t0 ? 1 : a.id < b.id ? -1 : 1));
   const prefixMaxEnd = [];
@@ -205,10 +211,21 @@ export function buildIndex(doc) {
      band heights stay put while panning. */
   const depthByCat = new Map();
   for (const r of doc.eras) {
-    const d = eraDepth(r, byId);
-    depthByCat.set(r.cat, Math.max(depthByCat.get(r.cat) ?? -1, d));
+    depthByCat.set(r.cat, Math.max(depthByCat.get(r.cat) ?? -1, eraLayer(r)));
   }
-  return { items, prefixMaxEnd, depthByCat };
+
+  /* Parentage, resolved once per document rather than per frame. The renderer
+     needs whole family groups — not just what is on screen — to decide whether
+     a layer may fold away, so this covers every era in the category. */
+  const erasByCat = new Map();
+  for (const r of doc.eras) {
+    if (!erasByCat.has(r.cat)) erasByCat.set(r.cat, []);
+    erasByCat.get(r.cat).push({
+      id: r.id, layer: eraLayer(r), t0: eraStart(r), t1: eraEnd(r), open: !r.end,
+      parentIds: parentsOf(doc.eras, r).map((p) => p.id),
+    });
+  }
+  return { items, prefixMaxEnd, depthByCat, erasByCat };
 }
 
 export function queryRange(index, t0, t1) {

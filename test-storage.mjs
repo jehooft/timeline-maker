@@ -61,8 +61,9 @@ ok("loads the document", back && back.name === "Renamed");
 ok("restores BigInt instants", typeof back.events[0].start.t === "bigint");
 ok("instants are unchanged", back.events[0].start.t === doc.events[0].start.t);
 ok("reattaches the picture", back.images.img_a && back.images.img_a.url === img.url);
-ok("keeps the era tree", back.eras.length === doc.eras.length
-   && back.eras.find((r) => r.id === "r_mes").parent === "r_phan");
+ok("keeps every era on its layer", back.eras.length === doc.eras.length
+   && back.eras.find((r) => r.id === "r_mes").layer === 1
+   && back.eras.find((r) => r.id === "r_jur").layer === 2);
 ok("missing documents return null", (await S.loadDoc("nope")) === null);
 
 /* ---- index ---- */

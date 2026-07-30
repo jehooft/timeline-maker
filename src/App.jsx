@@ -10,7 +10,7 @@ import { drawSymbol } from "./symbols.jsx";
 import { processImage, externalImage } from "./images.js";
 import {
   uid, PALETTE, starterDoc, buildIndex, queryRange, packRows, packLanes, siblingClash,
-  IMP,
+  IMP, layersOf, insertLayer, parentsOf,
 } from "./model.js";
 import { ScaleRail } from "./ui/ScaleRail.jsx";
 import { DetailCard } from "./ui/DetailCard.jsx";
@@ -192,6 +192,10 @@ export default function TimelineApp() {
   const [collapsed, setCollapsed] = useState(() => new Set());
   const [expanded, setExpanded] = useState(() => new Set(["earth"]));
   const [editingCat, setEditingCat] = useState(null);
+  /* The category you last touched. A new item starts here rather than in
+     whichever category happens to be first, which is almost never the one you
+     are working in. */
+  const [activeCat, setActiveCat] = useState(null);
   const [toast, setToast] = useState(null);
   const [menu, setMenu] = useState(null);      // { item, kind, x, y }
   const [unexported, setUnexported] = useState(0);
@@ -199,6 +203,10 @@ export default function TimelineApp() {
   /* Mirrors imgAreaRowsRef for persistence only — render reads the ref live,
      the same way it reads viewRef, so dragging never waits on a re-render. */
   const [imgAreaRows, setImgAreaRows] = useState(DEFAULT_IMG_ROWS);
+  /* Colours mixed in the custom picker and kept for reuse. A preference rather
+     than document data: the events themselves already store their own colour,
+     so a timeline exported and reopened elsewhere keeps its looks regardless. */
+  const [customColors, setCustomColors] = useState([]);
   const saveTimer = useRef(0);
   const skipSave = useRef(true);
 
@@ -275,6 +283,7 @@ export default function TimelineApp() {
   const gotoItem = (raw) => {
     fitRange(raw.start.t, raw.end ? raw.end.t : raw.start.t, raw.start.precision);
     setSelectedId(raw.id);
+    if (raw.cat) setActiveCat(raw.cat);
   };
   /* Opening a cluster is about separating its members, not framing its extent.
      Fitting the extent — which is roughly one pixel wide, since that is why
@@ -540,17 +549,48 @@ export default function TimelineApp() {
       const isCollapsed = collapsed.has(cat.id);
 
       /* Level of detail. Two rules, both about relevance at the current zoom:
-         a sliver too narrow to read carries no information, and an era that
-         already fills the screen makes every ancestor above it redundant, since
-         they would all be the same wash from edge to edge. Surviving levels are
-         renumbered so flattened rows give their vertical space back. */
+         a family of eras too narrow to read carries no information, and an era
+         that already fills the screen makes every ancestor above it redundant,
+         since they would all be the same wash from edge to edge. Surviving
+         levels are renumbered so flattened rows give their vertical space back. */
       let deepestCovering = -1;
       for (const er of bucket.eras) {
         const visW = Math.min(er.x2p, w) - Math.max(er.x1p, 0);
         if (visW >= w * ERA_COVER && er.depth > deepestCovering) deepestCovering = er.depth;
       }
+
+      /* Whether an era is a sliver is decided for its whole family at once, not
+         era by era. Triassic alone going thin should not fold it away while
+         Jurassic and Cretaceous beside it are still legible — the layer only
+         folds once everything under the same parent has gone too small to read.
+         An era with nothing above it has no family to fold with, so it stays.
+
+         Widths come from durations rather than the culled on-screen set: a
+         sibling scrolled off the edge still counts, and a duration divided by
+         the scale is the same number its drawn width would be. */
+      const catEras = index.erasByCat.get(cat.id) || [];
+      const thin = new Map();
+      for (const e of catEras) {
+        const t1 = e.open ? openFadeEndT(e.t0) : e.t1;
+        thin.set(e.id, Number(t1 - e.t0) / v.spp < ERA_MIN_PX);
+      }
+      const kidsOf = new Map();
+      for (const e of catEras) {
+        for (const pid of e.parentIds) {
+          if (!kidsOf.has(pid)) kidsOf.set(pid, []);
+          kidsOf.get(pid).push(e.id);
+        }
+      }
+      const folded = new Set();
+      for (const e of catEras) {
+        if (!e.parentIds.length) continue;          // nothing above it: never folds
+        const everyFamilyThin = e.parentIds.every(
+          (pid) => (kidsOf.get(pid) || []).every((k) => thin.get(k)));
+        if (everyFamilyThin) folded.add(e.id);
+      }
+
       const shownIds = new Set(bucket.eras
-        .filter((er) => er.depth >= deepestCovering && er.x2p - er.x1p >= ERA_MIN_PX)
+        .filter((er) => er.depth >= deepestCovering && !folded.has(er.id))
         .map((er) => er.id));
 
       /* Ease each era toward shown/hidden. An era seen for the first time takes
@@ -1165,6 +1205,7 @@ export default function TimelineApp() {
       } else if (hh) {
         selAnchorRef.current = { x: hh.x, y: hh.y };
         setSelectedId(hh.item.id);
+        if (hh.item.cat) setActiveCat(hh.item.cat);
         setPreview(null);
       } else setSelectedId(null);
     }
@@ -1182,15 +1223,18 @@ export default function TimelineApp() {
   };
   const blankDraft = (kind) => {
     const c = centreInstant();
+    const has = (id) => doc.categories.some((x) => x.id === id);
+    const cat = activeCat && has(activeCat) ? activeCat
+      : doc.categories[0] ? doc.categories[0].id : "";
     return {
-      kind, id: null, title: "", cat: doc.categories[0] ? doc.categories[0].id : "",
-      parent: "", sym: "dot", color: "", startStr: instantToInput(c.t, c.precision), endStr: "",
+      kind, id: null, title: "", cat,
+      layer: 0, sym: "dot", color: "", startStr: instantToInput(c.t, c.precision), endStr: "",
       desc: "", tagsStr: "", linksStr: "", imageId: "", pinImage: false,
       imp: IMP.NORMAL, ongoing: false,
     };
   };
   const draftFrom = (item, kind) => ({
-    kind, id: item.id, title: item.title, cat: item.cat, parent: item.parent || "",
+    kind, id: item.id, title: item.title, cat: item.cat, layer: item.layer || 0,
     sym: item.sym || "dot", color: item.color || "",
     startStr: instantToInput(item.start.t, item.start.precision),
     endStr: item.end ? instantToInput(item.end.t, item.end.precision) : "",
@@ -1201,10 +1245,11 @@ export default function TimelineApp() {
   });
   const onField = (k, val) => setDraft((d) => ({ ...d, [k]: val }));
 
-  /* `adoptIds` names eras this one should take as children — the resolution
-     offered when a new era turns out to be the broader of two that overlap. */
-  const saveDraft = (adoptIds) => {
-    const adopt = Array.isArray(adoptIds) && adoptIds.length ? adoptIds : null;
+  /* `liftToNewLayer` is the resolution offered when a new era overlaps others on
+     its layer: open a gap above them and drop it in, so the eras it covers
+     become its children without anything being re-pointed. */
+  const saveDraft = (liftToNewLayer) => {
+    const lift = liftToNewLayer === true;
     const start = parseDateInput(draft.startStr);
     if (!start || !draft.title.trim()) return;
     const endBlank = !draft.endStr.trim();
@@ -1226,43 +1271,42 @@ export default function TimelineApp() {
     if (links.length) obj.links = links;
     if (draft.color) obj.color = draft.color;
     if (draft.imageId) { obj.imageId = draft.imageId; obj.pinImage = !!draft.pinImage; }
-    if (isEra) obj.parent = draft.parent || null;
+    if (isEra) obj.layer = draft.layer || 0;
     else {
       obj.sym = draft.sym || "dot";
       if (draft.imp !== IMP.NORMAL) obj.imp = draft.imp;
       if (endBlank && draft.ongoing) obj.ongoing = true;
     }
 
-    /* Adopting resolves the overlap, so the clash check is against the tree as
+    /* Lifting opens a gap above the clash, so the check is against the stack as
        it will be, not as it is. */
-    if (isEra && !adopt && siblingClash(doc.eras, obj)) return;
+    if (isEra && !lift && siblingClash(doc.eras, obj)) return;
 
     const list = isEra ? "eras" : "events";
+    setActiveCat(obj.cat);
     setDoc((d) => {
-      const arr = d[list];
+      let arr = d[list];
+      let next = d;
+      if (isEra && lift) {
+        /* everything from this layer down drops one, freeing the layer for it */
+        arr = insertLayer(arr, obj.cat, obj.layer);
+        next = { ...d, categories: d.categories.map((c) => (c.id === obj.cat
+          ? { ...c, layers: layersOf(d, obj.cat) + 1 } : c)) };
+      }
       const i = arr.findIndex((x) => x.id === obj.id);
-      let next = i >= 0 ? arr.map((x) => (x.id === obj.id ? obj : x)) : [...arr, obj];
-      if (adopt) next = next.map((r) => (adopt.includes(r.id) ? { ...r, parent: obj.id } : r));
-      return { ...d, [list]: next };
+      const merged = i >= 0 ? arr.map((x) => (x.id === obj.id ? obj : x)) : [...arr, obj];
+      return { ...next, [list]: merged };
     }, draft.id ? "save:" + obj.id : null);
     setSelectedId(obj.id);
     setDraft(null);
-    setToast(adopt
-      ? "Saved — " + adopt.length + (adopt.length === 1 ? " era now sits" : " eras now sit") + " inside it"
-      : draft.id ? "Saved" : "Added to timeline");
+    setToast(lift ? "Saved on a new layer above" : draft.id ? "Saved" : "Added to timeline");
   };
   const deleteDraft = () => {
     const isEra = draft.kind === "era";
     const list = isEra ? "eras" : "events";
-    setDoc((d) => {
-      const next = { ...d, [list]: d[list].filter((x) => x.id !== draft.id) };
-      /* children of a deleted era move up rather than vanishing */
-      if (isEra) {
-        const gone = d.eras.find((r) => r.id === draft.id);
-        next.eras = next.eras.map((r) => (r.parent === draft.id ? { ...r, parent: gone ? gone.parent || null : null } : r));
-      }
-      return next;
-    });
+    /* Nothing to re-point when an era goes: whatever was under it simply
+       belongs to whatever else covers it now, or to nothing. */
+    setDoc((d) => ({ ...d, [list]: d[list].filter((x) => x.id !== draft.id) }));
     if (selectedId === draft.id) setSelectedId(null);
     setDraft(null);
     setToast("Deleted");
@@ -1277,6 +1321,16 @@ export default function TimelineApp() {
     }
   };
   const clearImage = () => setDraft((d) => ({ ...d, imageId: "", pinImage: false }));
+  const addCustomColor = (hex) => {
+    const c = String(hex || "").toLowerCase();
+    if (!/^#[0-9a-f]{6}$/.test(c)) return;
+    if (PALETTE.some((p) => p.toLowerCase() === c)) { setToast("Already in the palette"); return; }
+    if (customColors.some((p) => p.toLowerCase() === c)) { setToast("Already saved"); return; }
+    setCustomColors((cs) => [...cs, c]);
+    setToast("Colour saved to the palette");
+  };
+  const removeCustomColor = (hex) =>
+    setCustomColors((cs) => cs.filter((c) => c.toLowerCase() !== String(hex).toLowerCase()));
   const linkImage = (url) => {
     try {
       const rec = externalImage(url);
@@ -1328,16 +1382,7 @@ export default function TimelineApp() {
     const { item, kind } = menu;
     const list = kind === "era" ? "eras" : "events";
     setMenu(null);
-    setDoc((d) => {
-      const next = { ...d, [list]: d[list].filter((x) => x.id !== item.id) };
-      /* children of a deleted era move up rather than vanishing */
-      if (kind === "era") {
-        const gone = d.eras.find((r) => r.id === item.id);
-        next.eras = next.eras.map((r) => (r.parent === item.id
-          ? { ...r, parent: gone ? gone.parent || null : null } : r));
-      }
-      return next;
-    });
+    setDoc((d) => ({ ...d, [list]: d[list].filter((x) => x.id !== item.id) }));
     if (selectedId === item.id) setSelectedId(null);
     if (draft && draft.id === item.id) setDraft(null);
     setToast("Deleted");
@@ -1347,14 +1392,43 @@ export default function TimelineApp() {
   const addCategory = () => {
     const id = uid("cat");
     const color = PALETTE[doc.categories.length % PALETTE.length];
-    setDoc((d) => ({ ...d, categories: [...d.categories, { id, name: "New category", color }] }));
+    setDoc((d) => ({ ...d, categories: [...d.categories, { id, name: "New category", color, layers: 1 }] }));
     setEditingCat(id);
+    setActiveCat(id);
     setExpanded((s) => new Set(s).add(id));
   };
-  const categoryField = (id, key, val) =>
+  const categoryField = (id, key, val) => {
+    setActiveCat(id);
     setDoc((d) => ({ ...d, categories: d.categories.map((c) => (c.id === id ? { ...c, [key]: val } : c)) }),
       "cat:" + id + ":" + key);
+  };
+
+  /* Adding a layer is the one structural edit on a category. Inserting above
+     `at` pushes everything from that layer down, which is what quietly hands
+     the eras below a new parent. */
+  const addLayer = (catId, at) => {
+    setActiveCat(catId);
+    setDoc((d) => ({
+      ...d,
+      eras: insertLayer(d.eras, catId, at),
+      categories: d.categories.map((c) => (c.id === catId
+        ? { ...c, layers: layersOf(d, catId) + 1 } : c)),
+    }));
+    setToast("Layer added");
+  };
+  /* Only ever offered for a layer with nothing on it, so no era can be lost. */
+  const removeLayer = (catId, at) => {
+    setActiveCat(catId);
+    setDoc((d) => ({
+      ...d,
+      eras: d.eras.map((r) => (r.cat === catId && (r.layer || 0) > at ? { ...r, layer: (r.layer || 0) - 1 } : r)),
+      categories: d.categories.map((c) => (c.id === catId
+        ? { ...c, layers: Math.max(1, layersOf(d, catId) - 1) } : c)),
+    }));
+    setToast("Empty layer removed");
+  };
   const deleteCategory = (id) => {
+    const fallbackId = (doc.categories.find((c) => c.id !== id) || {}).id || null;
     setDoc((d) => {
       if (d.categories.length < 2) return d;
       const fallback = d.categories.find((c) => c.id !== id).id;
@@ -1362,10 +1436,13 @@ export default function TimelineApp() {
         ...d,
         categories: d.categories.filter((c) => c.id !== id),
         events: d.events.map((e) => (e.cat === id ? { ...e, cat: fallback } : e)),
-        eras: d.eras.map((r) => (r.cat === id ? { ...r, cat: fallback, parent: null } : r)),
+        /* Moved eras land on the top layer of their new home: their old layer
+           number means nothing in a category with a different stack. */
+        eras: d.eras.map((r) => (r.cat === id ? { ...r, cat: fallback, layer: 0 } : r)),
       };
     });
     setEditingCat(null);
+    setActiveCat(fallbackId);
     setToast("Category removed, its items moved");
   };
   const moveCategory = (i, dir) => {
@@ -1449,6 +1526,7 @@ export default function TimelineApp() {
       else if (e.key === "Home") { goTo(nowT(), "day"); e.preventDefault(); }
       else if (k === "f") { fitAll(); e.preventDefault(); }
       else if (k === "n") { setDraft(blankDraft("event")); e.preventDefault(); }
+      else if (k === "e") { setDraft(blankDraft("era")); e.preventDefault(); }
       else if (k === "b") { setPanelOpen((p) => !p); e.preventDefault(); }
       else if (e.key === "Escape") {
         setShowHelp(false); setDraft(null); setSelectedId(null);
@@ -1505,6 +1583,7 @@ export default function TimelineApp() {
           imgAreaRowsRef.current = st.imgAreaRows;
           setImgAreaRows(st.imgAreaRows);
         }
+        if (Array.isArray(st.customColors)) setCustomColors(st.customColors);
         skipSave.current = true;
         setHist(reset(chosen));
         setEntries(list);
@@ -1561,8 +1640,8 @@ export default function TimelineApp() {
   }, [unexported, booted]);
 
   useEffect(() => {
-    if (booted) saveAppState({ lastOpenedId: doc.id, uiScale, showLabels, theme, imgAreaRows });
-  }, [booted, doc.id, uiScale, showLabels, theme, imgAreaRows]);
+    if (booted) saveAppState({ lastOpenedId: doc.id, uiScale, showLabels, theme, imgAreaRows, customColors });
+  }, [booted, doc.id, uiScale, showLabels, theme, imgAreaRows, customColors]);
 
   /* A backstop: whatever goes wrong underneath, the controls come back. */
   useEffect(() => {
@@ -1755,12 +1834,15 @@ export default function TimelineApp() {
         {panelOpen && (
           <ItemsPanel
             doc={doc} index={index} collapsed={collapsed} expanded={expanded}
-            selectedId={selectedId} editingCat={editingCat} setEditingCat={setEditingCat}
+            selectedId={selectedId} editingCat={editingCat}
+            setEditingCat={(id) => { setEditingCat(id); if (id) setActiveCat(id); }}
             persistent={persistent} hidden={hidden}
+            activeCat={activeCat} onActivateCat={setActiveCat}
+            onAddLayer={addLayer} onRemoveLayer={removeLayer}
             onToggleHidden={(id) => toggleSet(setHidden, id)}
             onAdd={(kind) => setDraft(blankDraft(kind))}
             onAddCategory={addCategory}
-            onEditItem={(item, kind) => setDraft(draftFrom(item, kind))}
+            onEditItem={(item, kind) => { setActiveCat(item.cat); setDraft(draftFrom(item, kind)); }}
             onGoto={gotoItem}
             onMoveCategory={moveCategory}
             onToggleCollapse={(id) => toggleSet(setCollapsed, id)}
@@ -1808,7 +1890,9 @@ export default function TimelineApp() {
           {draft && (
             <Editor draft={draft} doc={doc} onField={onField} onSave={saveDraft}
               onDelete={deleteDraft} onClose={() => setDraft(null)}
-              onPickImage={pickImage} onLinkImage={linkImage} onClearImage={clearImage} />
+              onPickImage={pickImage} onLinkImage={linkImage} onClearImage={clearImage}
+              customColors={customColors} onAddColor={addCustomColor} onRemoveColor={removeCustomColor}
+              onAddLayer={addLayer} />
           )}
 
           {menu && (
@@ -1821,9 +1905,10 @@ export default function TimelineApp() {
             <div className="help">
               <h3>Controls</h3>
               <p><kbd>scroll</kbd> zoom · <kbd>drag</kbd> pan · <kbd>click</kbd> open</p>
-              <p><kbd>N</kbd> new event · <kbd>B</kbd> panel · <kbd>F</kbd> fit all</p>
+              <p><kbd>N</kbd> new event · <kbd>E</kbd> new era · <kbd>B</kbd> panel</p>
+              <p><kbd>F</kbd> fit all · <kbd>Home</kbd> now</p>
               <p><kbd>+</kbd> <kbd>−</kbd> zoom · <kbd>←</kbd> <kbd>→</kbd> pan</p>
-              <p><kbd>↑</kbd> <kbd>↓</kbd> scroll bands · <kbd>Home</kbd> now</p>
+              <p><kbd>↑</kbd> <kbd>↓</kbd> scroll bands</p>
               <p><kbd>Ctrl</kbd>+<kbd>F</kbd> search · <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo</p>
               <p><kbd>Tab</kbd> next item · <kbd>L</kbd> theme · <kbd>Esc</kbd> close</p>
               <p style={{ marginTop: 8, opacity: .8 }}>Rest on a pinned picture to peek at its card.</p>

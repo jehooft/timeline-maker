@@ -257,32 +257,29 @@ const rnd = (seed) => { let s = seed; return () => (s = (s*1103515245+12345) % 2
   ok("finds open-ended eras in the future",
      M.queryRange(idx, M.tFromCivil(2400,1,1), M.tFromCivil(2500,1,1)).some(i => i.open));
 
-/* ---- 10. the era tree ---- */
+/* ---- 10. era layers ---- */
 {
   const doc = M.starterDoc();
   const eras = doc.eras;
   const byId = new Map(eras.map(r => [r.id, r]));
 
-  /* no two siblings anywhere in the sample data overlap */
+  /* nothing sharing a layer overlaps anywhere in the sample data */
   let clashes = [];
   for (const r of eras) { const c = M.siblingClash(eras, r); if (c) clashes.push(r.title + " / " + c.title); }
-  ok("sample eras have no sibling overlaps", clashes.length === 0, clashes.join(" | "));
+  ok("sample eras have no same-layer overlaps", clashes.length === 0, clashes.join(" | "));
 
   /* abutting is allowed: an era starting exactly where another ends */
   const arc = eras.find(r => r.id === "r_arc"), con = eras.find(r => r.id === "r_con");
   ok("abutting eras share an exact instant", M.eraEnd(arc) === M.eraStart(con));
   ok("abutting eras do not clash", M.siblingClash(eras, con) === null);
 
-  /* a genuine overlap is caught */
-  const bad = { id: "__x__", cat: "vg", parent: null, title: "Bad",
+  /* a genuine overlap on one layer is caught */
+  const bad = { id: "__x__", cat: "vg", layer: 0, title: "Bad",
                 start: { t: M.tFromCivil(1980,1,1), precision: "year" },
                 end: { t: M.tFromCivil(1990,1,1), precision: "year" } };
-  ok("overlapping sibling is rejected", M.siblingClash(eras, bad) !== null);
-  /* nesting it under the era it overlaps resolves the clash (no sub-eras there) */
-  ok("nesting resolves the overlap", M.siblingClash(eras, { ...bad, parent: "r_arc" }) === null);
-  /* but it still clashes if the chosen parent already has sub-eras in the way */
-  ok("nesting under a crowded parent still clashes",
-     M.siblingClash(eras, { ...bad, parent: "r_con" }) !== null);
+  ok("overlapping era on one layer is rejected", M.siblingClash(eras, bad) !== null);
+  /* the whole point of layers: another layer may cover the same span freely */
+  ok("the same range on another layer is fine", M.siblingClash(eras, { ...bad, layer: 2 }) === null);
   /* clashes never cross category boundaries */
   ok("clashes stay within one category", M.siblingClash(eras, bad).cat === "vg");
   ok("an era in a free stretch is accepted",
@@ -291,85 +288,120 @@ const rnd = (seed) => { let s = seed; return () => (s = (s*1103515245+12345) % 2
        end: { t: M.tFromCivil(-4000,1,1), precision: "year" } }) === null);
 
   /* ---- adding a broader era over ones that already exist ----
-     The reported dead end: with "Mesozoic" already at the top level, adding
-     "Phanerozoic" over it clashed, and the only offered fix was to nest the
-     new era under the old one — backwards, since the new one is the container.
-     Overlap purely by containment must be resolvable the other way. */
+     The old dead end: "Phanerozoic" over an existing "Mesozoic" clashed with no
+     sensible way out. Now it is a layer insert — everything drops one and the
+     new era takes the freed layer, with parentage falling out of the overlap
+     rather than being re-pointed by hand. */
   {
-    const era2 = (id, title, from, to) => ({
-      id, cat: "z", parent: null, title,
+    const era2 = (id, title, from, to, layer = 0) => ({
+      id, cat: "z", layer, title,
       start: { t: M.agoY(from), precision: "myr" },
       end: to === null ? null : { t: M.agoY(to), precision: "myr" },
     });
     const mes = era2("m", "Mesozoic", 251.9e6, 66e6);
     const phan = era2("p", "Phanerozoic", 538.8e6, null);
 
-    ok("the broader era still reports a clash", M.siblingClash([mes], phan) !== null);
-    const adopt = M.containedSiblings([mes], phan);
-    ok("containment offers a way out", adopt !== null && adopt.length === 1 && adopt[0].id === "m",
-       JSON.stringify(adopt && adopt.map((r) => r.id)));
-    const after = [{ ...mes, parent: "p" }, phan];
-    ok("adopting resolves it for the new era", M.siblingClash(after, phan) === null);
-    ok("and for the adopted one", M.siblingClash(after, after[0]) === null);
-    ok("the adopted era sits inside its new parent", M.escapesParent(after, after[0]) === null);
-    ok("depth follows", M.eraDepth(after[0], new Map(after.map((r) => [r.id, r]))) === 1);
+    ok("the broader era still reports a clash on its layer", M.siblingClash([mes], phan) !== null);
+    const lifted = [...M.insertLayer([mes], "z", 0), phan];
+    ok("inserting a layer pushes the old era down", lifted.find(r => r.id === "m").layer === 1);
+    ok("and the new one keeps the freed layer", lifted.find(r => r.id === "p").layer === 0);
+    ok("the clash is gone", M.siblingClash(lifted, phan) === null);
+    ok("and gone for the era that moved",
+       M.siblingClash(lifted, lifted.find(r => r.id === "m")) === null);
+    ok("the moved era is now a child, with nothing re-pointed",
+       M.parentsOf(lifted, lifted.find(r => r.id === "m")).map(r => r.id).join() === "p");
 
     /* several at once — re-adding Mesozoic over its own periods */
     const tri = era2("t", "Triassic", 251.9e6, 201.4e6);
     const jur = era2("j", "Jurassic", 201.4e6, 145e6);
     const cre = era2("c", "Cretaceous", 145e6, 66e6);
-    const many = M.containedSiblings([tri, jur, cre], mes);
-    ok("every covered sibling is offered", many !== null && many.length === 3,
-       JSON.stringify(many && many.map((r) => r.id)));
+    const lifted2 = [...M.insertLayer([tri, jur, cre], "z", 0), mes];
+    ok("every covered era becomes a child at once",
+       M.childrenOf(lifted2, mes).map(r => r.id).sort().join() === "c,j,t",
+       JSON.stringify(M.childrenOf(lifted2, mes).map(r => r.id)));
+    ok("insertLayer leaves other categories alone",
+       M.insertLayer([{ ...mes, cat: "other" }], "z", 0)[0].layer === 0);
 
-    /* a candidate that cuts through a sibling is a real conflict */
-    ok("partial overlap stays unresolvable",
-       M.containedSiblings([mes], era2("x", "Partial", 300e6, 150e6)) === null);
-    ok("partial overlap the other way too",
-       M.containedSiblings([mes], era2("x", "Partial", 150e6, 20e6)) === null);
-    /* exact abutment is not an overlap at all, so there is nothing to adopt */
-    ok("an abutting neighbour is not adopted",
-       M.containedSiblings([mes], era2("x", "Cenozoic", 66e6, 0)) === null);
-    ok("a disjoint era offers nothing", M.containedSiblings([mes], era2("x", "Later", 30e6, 10e6)) === null);
-    /* identical bounds count as contained — the new era can still take it in */
-    ok("an identical range is containment",
-       (M.containedSiblings([mes], era2("x", "Same", 251.9e6, 66e6)) || []).length === 1);
+    /* an era straddling two above it belongs to both — impossible with a tree */
+    const age1 = era2("a1", "Age 1", 100e6, 50e6, 0);
+    const age2 = era2("a2", "Age 2", 50e6, 10e6, 0);
+    const straddle = era2("a3", "Age 3", 70e6, 30e6, 1);
+    const both = M.parentsOf([age1, age2, straddle], straddle).map(r => r.id).sort();
+    ok("an era under two adjacent ones belongs to both", both.join() === "a1,a2", JSON.stringify(both));
+    ok("and each of those two claims it as a child",
+       M.childrenOf([age1, age2, straddle], age1).length === 1
+       && M.childrenOf([age1, age2, straddle], age2).length === 1);
 
-    /* the tree's own boundaries still apply */
-    ok("another category is never adopted",
-       M.containedSiblings([{ ...mes, cat: "other" }], phan) === null);
-    ok("an era at another level is never adopted",
-       M.containedSiblings([{ ...mes, parent: "somewhere" }], phan) === null);
-    ok("an era never adopts itself", M.containedSiblings([phan], phan) === null);
+    /* abutment is not overlap, so it buys no parentage */
+    ok("merely abutting does not make a parent",
+       M.parentsOf([age1, era2("u", "Just after", 50e6, 10e6, 1)],
+                   era2("u", "Just after", 50e6, 10e6, 1)).length === 0);
+    /* a gap above leaves an era with no family at all */
+    ok("an era with nothing above it has no parents",
+       M.parentsOf([age1], era2("g", "Gap", 9e6, 1e6, 1)).length === 0);
+    ok("the top layer never has parents", M.parentsOf([age1, age2], age1).length === 0);
+    ok("parentage never crosses categories",
+       M.parentsOf([{ ...age1, cat: "other" }], straddle).length === 0);
+    ok("only the layer directly above counts",
+       M.parentsOf([age1, era2("deep", "Deep", 70e6, 30e6, 3)],
+                   era2("deep", "Deep", 70e6, 30e6, 3)).length === 0);
   }
 
-  /* depth */
-  ok("top-level era is depth 0", M.eraDepth(byId.get("r_phan"), byId) === 0);
-  ok("sub-era is depth 1", M.eraDepth(byId.get("r_mes"), byId) === 1);
-  ok("sub-sub-era is depth 2", M.eraDepth(byId.get("r_jur"), byId) === 2);
-  ok("index records max depth per category", M.buildIndex(doc).depthByCat.get("earth") === 2,
+  /* layers */
+  ok("top-layer era is layer 0", M.eraLayer(byId.get("r_phan")) === 0);
+  ok("one down is layer 1", M.eraLayer(byId.get("r_mes")) === 1);
+  ok("two down is layer 2", M.eraLayer(byId.get("r_jur")) === 2);
+  ok("index records the deepest layer per category", M.buildIndex(doc).depthByCat.get("earth") === 2,
      String(M.buildIndex(doc).depthByCat.get("earth")));
+  ok("a category reports its layer count", M.layersOf(doc, "earth") === 3, String(M.layersOf(doc, "earth")));
+  ok("and never fewer than one", M.layersOf({ categories: [{ id: "e" }], eras: [] }, "e") === 1);
+  ok("a stored count below what the eras need is ignored",
+     M.layersOf({ categories: [{ id: "c", layers: 1 }], eras: [{ id: "r", cat: "c", layer: 4 }] }, "c") === 5);
 
-  /* a cycle must not hang the depth walk */
-  const cyc = [{ id: "a", parent: "b", cat: "x" }, { id: "b", parent: "a", cat: "x" }];
-  const cycById = new Map(cyc.map(r => [r.id, r]));
-  let hung = false;
-  try { M.eraDepth(cyc[0], cycById); } catch (e) { hung = true; }
-  ok("cyclic parents terminate", !hung);
+  /* the sample data's own family structure, which the fold rule depends on */
+  ok("the periods sit under the Mesozoic",
+     M.parentsOf(eras, byId.get("r_jur")).map(r => r.id).join() === "r_mes");
+  ok("the Mesozoic sits under the Phanerozoic",
+     M.parentsOf(eras, byId.get("r_mes")).map(r => r.id).join() === "r_phan");
+  ok("the Phanerozoic sits under nothing", M.parentsOf(eras, byId.get("r_phan")).length === 0);
+  ok("the Mesozoic's children are its three periods",
+     M.childrenOf(eras, byId.get("r_mes")).map(r => r.id).sort().join() === "r_cre,r_jur,r_tri");
+  ok("every era in the sample either has a parent or is on the top layer",
+     eras.every(r => M.eraLayer(r) === 0 || M.parentsOf(eras, r).length > 0));
 
-  /* descendants, so the parent picker can't create a cycle */
-  const desc = M.descendantsOf(eras, "r_phan");
-  ok("descendants include grandchildren", desc.has("r_jur") && desc.has("r_mes") && desc.has("r_phan"));
-  ok("descendants exclude siblings", !desc.has("r_arch"));
+  /* the index carries the same parentage, resolved once for the renderer */
+  {
+    const idx2 = M.buildIndex(doc).erasByCat.get("earth");
+    const jur = idx2.find(e => e.id === "r_jur");
+    ok("the index records parents too", jur.parentIds.join() === "r_mes", JSON.stringify(jur.parentIds));
+    ok("and none for the top layer",
+       idx2.find(e => e.id === "r_phan").parentIds.length === 0);
+  }
 
-  /* containment is a soft warning, not an error */
-  ok("child inside parent is fine", M.escapesParent(eras, byId.get("r_mes")) === null);
-  const escapee = { ...byId.get("r_mes"), start: { t: M.tFromCivil(-5000000000,1,1), precision: "gyr" } };
-  ok("child reaching outside parent is flagged", M.escapesParent(eras, escapee) !== null);
-
-  /* every era sits inside its parent in the sample data */
-  const escapes = eras.filter(r => M.escapesParent(eras, r)).map(r => r.title);
-  ok("sample sub-eras stay inside their parents", escapes.length === 0, escapes.join(", "));
+  /* ---- migrating a document written before layers existed ---- */
+  {
+    const legacy = [
+      { id: "p", cat: "z", parent: null, title: "Phanerozoic" },
+      { id: "m", cat: "z", parent: "p", title: "Mesozoic" },
+      { id: "j", cat: "z", parent: "m", title: "Jurassic" },
+      { id: "loose", cat: "z", parent: "missing", title: "Dangling" },
+    ];
+    const conv = M.erasWithLayers(legacy);
+    ok("depth in the old tree becomes the layer number",
+       conv.find(r => r.id === "p").layer === 0
+       && conv.find(r => r.id === "m").layer === 1
+       && conv.find(r => r.id === "j").layer === 2,
+       JSON.stringify(conv.map(r => r.id + ":" + r.layer)));
+    ok("a parent that no longer exists lands on the top layer",
+       conv.find(r => r.id === "loose").layer === 0);
+    ok("the old pointer is dropped", conv.every(r => !("parent" in r)));
+    let hung = false;
+    try { M.erasWithLayers([{ id: "a", cat: "x", parent: "b" }, { id: "b", cat: "x", parent: "a" }]); }
+    catch (e) { hung = true; }
+    ok("cyclic parents terminate rather than hanging", !hung);
+    const already = [{ id: "a", cat: "x", layer: 2 }];
+    ok("documents already on layers pass through untouched", M.erasWithLayers(already) === already);
+  }
 
   /* ---- REGRESSION: opening an era in the editor and saving it unchanged ----
      This is the reported bug. The editor round-trips dates through text, so if
