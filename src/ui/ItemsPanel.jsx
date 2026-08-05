@@ -9,7 +9,17 @@ import { IMP, layersOf, eraLayer } from "../model.js";
 export function ItemsPanel({ doc, index, collapsed, expanded, selectedId, persistent, hidden, onToggleHidden, onAdd, onAddCategory,
   onEditItem, onGoto, onMoveCategory, onToggleCollapse, onToggleExpand,
   onCategoryField, onDeleteCategory, onRename, editingCat, setEditingCat,
-  activeCat, onActivateCat, onAddLayer, onRemoveLayer }) {
+  activeCat, onActivateCat, onAddLayer, onRemoveLayer,
+  multi, onToggleMulti, onSelectMany }) {
+
+  /* Ctrl- or Shift-click picks an item into the group rather than jumping the
+     view to it — the same modifier the canvas uses, so one habit covers both. */
+  const grouping = (e) => e.ctrlKey || e.metaKey || e.shiftKey;
+  const pick = (e, item, go) => {
+    if (grouping(e)) { e.preventDefault(); onToggleMulti(item.id); return; }
+    go();
+  };
+  const inGroup = (id) => multi.has(id);
 
   const counts = new Map(doc.categories.map((c) => [c.id, 0]));
   for (const it of index.items) counts.set(it.cat, (counts.get(it.cat) || 0) + 1);
@@ -71,6 +81,9 @@ export function ItemsPanel({ doc, index, collapsed, expanded, selectedId, persis
                     className={isCollapsed ? "on" : ""} onClick={() => onToggleCollapse(cat.id)}>
                     {isCollapsed ? "⊞" : "⊟"}
                   </button>
+                  <button title="Select everything in this category"
+                    onClick={() => onSelectMany([...doc.eras.filter((r) => r.cat === cat.id), ...evs]
+                      .map((x) => x.id))}>▣</button>
                   <button title="Edit category" className={editingCat === cat.id ? "on" : ""}
                     onClick={() => setEditingCat(editingCat === cat.id ? null : cat.id)}>✎</button>
                 </span>
@@ -116,8 +129,9 @@ export function ItemsPanel({ doc, index, collapsed, expanded, selectedId, persis
                         </div>
                       )}
                       {eras.map((r) => (
-                        <div key={r.id} className={"item" + (selectedId === r.id ? " sel" : "")}>
-                          <button className="item-main" onClick={() => onGoto(r)}
+                        <div key={r.id} className={"item" + (selectedId === r.id ? " sel" : "")
+                          + (inGroup(r.id) ? " grp" : "")}>
+                          <button className="item-main" onClick={(e) => pick(e, r, () => onGoto(r))}
                             style={{ paddingLeft: 26 + layer * 12 }}>
                             <span className="era-mark" style={{ background: r.color || cat.color }} />
                             <span className="item-title">{r.title}</span>
@@ -131,8 +145,9 @@ export function ItemsPanel({ doc, index, collapsed, expanded, selectedId, persis
                   {evs.map((e) => {
                     const imp = e.imp ?? IMP.NORMAL;
                     return (
-                      <div key={e.id} className={"item" + (selectedId === e.id ? " sel" : "")}>
-                        <button className="item-main" onClick={() => onGoto(e)}>
+                      <div key={e.id} className={"item" + (selectedId === e.id ? " sel" : "")
+                        + (inGroup(e.id) ? " grp" : "")}>
+                        <button className="item-main" onClick={(ev) => pick(ev, e, () => onGoto(e))}>
                           <SymbolChip name={e.sym} color={e.color || cat.color} size={14} />
                           <span className={"item-title" + (imp >= IMP.IMPORTANT ? " key" : "")
                             + (imp <= IMP.UNIMPORTANT ? " dim" : "")}>{e.title}</span>

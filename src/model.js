@@ -149,6 +149,25 @@ export function childrenOf(eras, era) {
   return eras.filter((r) => r.cat === era.cat && eraLayer(r) === L + 1 && erasOverlap(r, era));
 }
 
+/* The eras a moment — or a span — falls inside, broadest layer first. Which
+   eras something sits in is not stored anywhere: like parentage, it is read
+   off the dates whenever something needs it, so moving an era changes what its
+   contents belong to without a single event being touched.
+
+   Eras are half-open, running up to their end without including it, so a point
+   on the boundary between two abutting eras belongs to the later one — the
+   same rule the era bars are drawn with. */
+export function erasAround(eras, catId, t0, t1 = t0) {
+  const lo = t0, hi = t1 > t0 ? t1 : t0;
+  const point = hi === lo;
+  return (eras || [])
+    .filter((r) => r.cat === catId
+      && (point ? eraStart(r) <= lo && eraEnd(r) > lo
+        : eraStart(r) < hi && eraEnd(r) > lo))
+    .sort((a, b) => eraLayer(a) - eraLayer(b)
+      || (eraStart(a) < eraStart(b) ? -1 : eraStart(a) > eraStart(b) ? 1 : 0));
+}
+
 /* Eras sharing a layer may touch end-to-start, but may not overlap. Different
    layers are free to overlap however they like. Returns the clash. */
 export function siblingClash(eras, candidate) {
@@ -168,6 +187,33 @@ export function siblingClash(eras, candidate) {
    them, without a single pointer being rewritten. */
 export function insertLayer(eras, catId, at) {
   return eras.map((r) => (r.cat === catId && eraLayer(r) >= at ? { ...r, layer: eraLayer(r) + 1 } : r));
+}
+
+/* Moving a batch of eras into another category. Layer numbers mean nothing
+   outside the category they came from, so the moved eras land *below* whatever
+   the destination already has, keeping their own relative stacking. Anything
+   that would still overlap a neighbour on its new layer drops one further,
+   rather than quietly breaking the one-span-per-layer rule — which is possible
+   here in a way it never is inside a category, since two eras arriving from
+   different categories may well cover the same years. */
+export function moveErasToCategory(eras, ids, catId) {
+  const moving = (eras || []).filter((r) => ids.has(r.id) && r.cat !== catId);
+  if (!moving.length) return eras;
+  const movingIds = new Set(moving.map((r) => r.id));
+  const placed = eras.filter((r) => !movingIds.has(r.id));
+  let base = 0;
+  for (const r of placed) if (r.cat === catId) base = Math.max(base, eraLayer(r) + 1);
+  const minL = Math.min(...moving.map(eraLayer));
+  const out = new Map();
+  const order = [...moving].sort((a, b) => eraLayer(a) - eraLayer(b)
+    || (eraStart(a) < eraStart(b) ? -1 : 1));
+  for (const r of order) {
+    let cand = { ...r, cat: catId, layer: base + (eraLayer(r) - minL) };
+    while (siblingClash(placed, cand)) cand = { ...cand, layer: cand.layer + 1 };
+    placed.push(cand);
+    out.set(r.id, cand);
+  }
+  return eras.map((r) => out.get(r.id) || r);
 }
 
 /* Documents written before layers existed carry `parent` instead. Depth in the

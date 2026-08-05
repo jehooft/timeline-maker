@@ -204,6 +204,7 @@ export const STYLES = `
         .sw-auto { position: relative; opacity: .55; }
         .sw-custom { width: 24px; height: 24px; padding: 0; border: 1px solid var(--rule);
                      background: none; border-radius: 3px; cursor: pointer; }
+        .swatches.erasw { margin-top: 5px; }
         .sw.saved { border-style: dashed; }
         .sw.saved.on { border-style: solid; }
         .sw-add { color: var(--muted); font: 14px/1 ui-monospace, monospace; padding: 0;
@@ -396,6 +397,25 @@ export const STYLES = `
                  background: var(--ink-3); border: 1px solid var(--rule); border-radius: 4px;
                  padding: 8px 14px; font: 11px ui-monospace, monospace; letter-spacing: .06em;
                  color: var(--text); box-shadow: 0 8px 24px rgba(0,0,0,.5); z-index: 30; }
+        /* Steps over the group bar rather than under it, on the rare frame
+           where both are up. */
+        .toast.raised { bottom: 66px; }
+
+        /* ---- group selection ---- */
+        .marquee { position: absolute; pointer-events: none; z-index: 14;
+                   border: 1px solid var(--accent); background: rgba(224,166,75,.10); }
+        .multibar { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+                    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                    max-width: calc(100% - 28px);
+                    background: var(--ink-2); border: 1px solid var(--accent); border-radius: 5px;
+                    padding: 7px 8px 7px 14px; z-index: 22;
+                    box-shadow: 0 14px 34px rgba(0,0,0,.55); }
+        .multibar b { font: 600 12px ui-monospace, monospace; color: var(--text); }
+        .multibar em { font-style: normal; font-size: 11px; color: var(--muted); }
+        .multibar select { background: var(--ink); color: var(--text); border: 1px solid var(--rule);
+                           border-radius: 3px; padding: 4px 6px; font-size: 11.5px; }
+        .item.grp { background: var(--ink-3); box-shadow: inset 2px 0 0 var(--accent); }
+        .item.grp .item-title { color: var(--accent); }
 
         @media (max-width: 860px) {
           .readout { width: 100%; margin-left: 0; gap: 12px; }

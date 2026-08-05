@@ -10,7 +10,7 @@ import { drawSymbol } from "./symbols.jsx";
 import { processImage, externalImage } from "./images.js";
 import {
   uid, PALETTE, starterDoc, buildIndex, queryRange, packRows, packLanes, siblingClash,
-  IMP, layersOf, insertLayer, parentsOf,
+  IMP, IMP_LEVELS, layersOf, insertLayer, parentsOf, moveErasToCategory,
 } from "./model.js";
 import { ScaleRail } from "./ui/ScaleRail.jsx";
 import { DetailCard } from "./ui/DetailCard.jsx";
@@ -186,6 +186,14 @@ export default function TimelineApp() {
   const [jump, setJump] = useState("");
   const [jumpErr, setJumpErr] = useState(false);
   const [selectedId, setSelectedId] = useState(null);
+  /* A group selection, held alongside the single one rather than replacing it.
+     Ctrl- or Shift-click adds one item at a time, Shift-drag sweeps a rectangle
+     over the canvas, and while it holds anything the detail card gives way to
+     the actions bar — one panel about one item, or one about several. */
+  const [multi, setMulti] = useState(() => new Set());
+  const [marquee, setMarquee] = useState(null);   // the live sweep rectangle
+  const [confirmBulk, setConfirmBulk] = useState(false);
+  const marqueeRef = useRef(null);
   const [hover, setHover] = useState(null);       // { id, img }
   const [preview, setPreview] = useState(null);   // id of a hovered pinned image
   const [draft, setDraft] = useState(null);
@@ -215,6 +223,15 @@ export default function TimelineApp() {
     () => (selectedId ? index.items.find((i) => i.id === selectedId) || null : null), [selectedId, index]);
   const previewItem = useMemo(
     () => (preview ? index.items.find((i) => i.id === preview) || null : null), [preview, index]);
+  /* Counted off the document rather than the set itself, so an id left behind
+     by a delete or an undo simply stops counting instead of holding the bar
+     open over nothing. */
+  const multiCounts = useMemo(() => {
+    let events = 0, eras = 0;
+    for (const e of doc.events) if (multi.has(e.id)) events++;
+    for (const r of doc.eras) if (multi.has(r.id)) eras++;
+    return { events, eras, total: events + eras };
+  }, [doc, multi]);
 
   /* ---------------------------------------------------------- viewport maths */
   const normalize = (v) => {
@@ -696,13 +713,22 @@ export default function TimelineApp() {
           const top = stripTop + rowTopOf.get(er.depth);
           if (top + barH < AXIS_Y + rulerPad || top > h) continue;
           const color = er.color || cat.color;
-          const sel = selectedId === er.id, hov = hover && hover.id === er.id;
+          const grp = multi.has(er.id);
+          const sel = selectedId === er.id || grp, hov = hover && hover.id === er.id;
           const bx1 = Math.max(-30, er.x1p), bx2 = Math.min(w + 30, er.x2p);
           if (bx2 <= bx1) continue;
           const inner = Math.max(1, barH - 3);
 
           fadeRect(ctx, bx1, bx2, top + 1, inner, color,
             (sel || hov ? Math.min(1, aEra + 0.2) : aEra) * a, er.open, nowX, er.x2p);
+          /* A group member is outlined in the accent, which reads as "picked"
+             at a glance even on a bar whose own colour is already strong. */
+          if (grp) {
+            const gl = Math.max(bx1, 0), gr = Math.min(bx2, w);
+            ctx.strokeStyle = cAccent; ctx.globalAlpha = a;
+            ctx.strokeRect(Math.round(gl) + 0.5, top + 1.5, Math.max(1, gr - gl - 1), inner - 1);
+            ctx.globalAlpha = 1;
+          }
           /* hairline seam so abutting eras stay legible as separate bars */
           if (er.x1p > 0 && er.x1p < w) {
             ctx.globalAlpha = a;
@@ -761,7 +787,8 @@ export default function TimelineApp() {
           continue;
         }
         const color = it.color || cat.color;
-        const sel = selectedId === it.id, hov = hover && hover.id === it.id;
+        const grp = multi.has(it.id);
+        const sel = selectedId === it.id || grp, hov = hover && hover.id === it.id;
 
         const lvl = it.imp ?? IMP.NORMAL;
         const sizeScale = IMP_SIZE[lvl] ?? 1;
@@ -798,6 +825,11 @@ export default function TimelineApp() {
             ctx.lineWidth = 1; ctx.globalAlpha = 1;
           }
           drawSymbol(ctx, it.sym, it.x1p, cy, symR * sizeScale, color);
+          if (grp) {
+            ctx.strokeStyle = cAccent; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.9;
+            ctx.beginPath(); ctx.arc(it.x1p, cy, 13 * S, 0, 6.2832); ctx.stroke();
+            ctx.lineWidth = 1; ctx.globalAlpha = 1;
+          }
         }
         if (it.lw > 0) {
           ctx.font = fM;
@@ -807,9 +839,15 @@ export default function TimelineApp() {
                above it. One too short puts the label beside the end cap — on
                the bar's own line, level with it, the way a point event's label
                sits. It used to keep the raised baseline in that case too, which
-               left the name floating up and to the right of nothing. */
+               left the name floating up and to the right of nothing.
+
+               A wide bar's label rides the left edge of the screen while the
+               bar runs off it, but never past the bar's own end: clamping up to
+               10 last meant the name stayed pinned at the edge long after the
+               span itself had been panned away, with nothing under it. */
             const wide = it.x2p - it.x1p > it.lw + 24 * S;
-            const lx = wide ? Math.max(Math.min(it.x1p + 14 * S, it.x2p - it.lw - 6), 10) : it.x2p + 10 * S;
+            const lx = wide ? Math.min(Math.max(it.x1p + 14 * S, 10), it.x2p - it.lw - 6)
+              : it.x2p + 10 * S;
             const ly = wide ? rowTop + 9 * S : cy + 4 * S;
             if (lx < w - 4 && lx + it.lw > 0) ctx.fillText(it.title, lx, ly);
           } else if (it.x1p < w && it.x1p + it.lw > -40) {
@@ -873,7 +911,8 @@ export default function TimelineApp() {
 
     for (const p of packedImgs.items) {
       newRows.set(p.key, p.row);
-      const sel = selectedId === p.it.id, hov = hover && hover.id === p.it.id && hover.img;
+      const sel = selectedId === p.it.id || multi.has(p.it.id),
+        hov = hover && hover.id === p.it.id && hover.img;
       const pcat = doc.categories.find((c) => c.id === p.it.cat);
       const color = p.it.color || (pcat ? pcat.color : cMuted);
 
@@ -1041,7 +1080,7 @@ export default function TimelineApp() {
        is still easing. Every value snaps to its target once it is close, so
        this always terminates. */
     if (animating) invalidate();
-  }, [doc, index, showLabels, selectedId, hover, collapsed, uiScale, hidden, theme,
+  }, [doc, index, showLabels, selectedId, multi, hover, collapsed, uiScale, hidden, theme,
     measure, invalidate]);
 
   useEffect(() => { renderRef.current = render; render(); }, [render]);
@@ -1139,6 +1178,38 @@ export default function TimelineApp() {
     invalidate();
   };
 
+  /* ------------------------------------------------------- group selection */
+  const clearMulti = () => { setMulti((s) => (s.size ? new Set() : s)); setConfirmBulk(false); };
+  const toggleMulti = (id) => setMulti((s) => {
+    const n = new Set(s);
+    /* The first Ctrl-click on a second item means "this one as well as the one
+       already open", not "only this one" — otherwise the item you were looking
+       at when you started grouping is silently left out. */
+    if (!n.size && selectedId && selectedId !== id) n.add(selectedId);
+    if (n.has(id)) n.delete(id); else n.add(id);
+    return n;
+  });
+  /* A sweep takes everything it touches rather than only what it encloses: a
+     span can be wider than the screen, so demanding full enclosure would make
+     long events unselectable by rectangle at any useful zoom. */
+  const applyMarquee = (m) => {
+    const x0 = Math.min(m.x0, m.x1), x1 = Math.max(m.x0, m.x1);
+    const y0 = Math.min(m.y0, m.y1), y1 = Math.max(m.y0, m.y1);
+    if (x1 - x0 < 4 && y1 - y0 < 4) {
+      /* barely moved — this was a Shift-click, which toggles one item */
+      const hh = hitTest(x0, y0);
+      if (hh && !hh.isCluster) toggleMulti(hh.item.id);
+      else if (!m.add) clearMulti();
+      return;
+    }
+    const picked = hitsRef.current
+      .filter((hh) => !hh.isCluster && !hh.isImage
+        && hh.x1 >= x0 && hh.x0 <= x1 && hh.y1 >= y0 && hh.y0 <= y1)
+      .map((hh) => hh.item.id);
+    setMulti((s) => (m.add ? new Set([...s, ...picked]) : new Set(picked)));
+    setConfirmBulk(false);
+  };
+
   const onPointerDown = (e) => {
     e.currentTarget.setPointerCapture(e.pointerId);
     const r = e.currentTarget.getBoundingClientRect();
@@ -1150,6 +1221,15 @@ export default function TimelineApp() {
     clearHoverTimer();
     clearPressTimer();
     if (preview) setPreview(null);
+    /* Shift is the explicit "I am selecting, not navigating" modifier, so it
+       wins over both the axis handle and panning. Holding Ctrl as well adds to
+       whatever is already picked instead of starting over. */
+    if (pointers.current.size === 1 && e.shiftKey) {
+      const m = { x0: px, y0: py, x1: px, y1: py, add: e.ctrlKey || e.metaKey };
+      marqueeRef.current = m;
+      setMarquee(m);
+      return;
+    }
     if (pointers.current.size === 1 && nearAxis(px, py)) {
       axisDragRef.current = true;
       setImgAreaFromY(py);
@@ -1170,6 +1250,12 @@ export default function TimelineApp() {
   };
   const onPointerMove = (e) => {
     const r = e.currentTarget.getBoundingClientRect();
+    if (marqueeRef.current) {
+      const m = { ...marqueeRef.current, x1: e.clientX - r.left, y1: e.clientY - r.top };
+      marqueeRef.current = m;
+      setMarquee(m);
+      return;
+    }
     if (axisDragRef.current) { setImgAreaFromY(e.clientY - r.top); return; }
     const prev = pointers.current.get(e.pointerId);
     if (!prev) {
@@ -1197,6 +1283,15 @@ export default function TimelineApp() {
   };
   const onPointerUp = (e) => {
     const r = e.currentTarget.getBoundingClientRect();
+    if (marqueeRef.current) {
+      const m = marqueeRef.current;
+      marqueeRef.current = null;
+      setMarquee(null);
+      pointers.current.delete(e.pointerId);
+      dragState.current = null;
+      applyMarquee(m);
+      return;
+    }
     if (axisDragRef.current) {
       axisDragRef.current = false;
       setImgAreaRows(imgAreaRowsRef.current);   // commits the drag for persistence
@@ -1217,11 +1312,12 @@ export default function TimelineApp() {
         openCluster(hh.item);
         setPreview(null);
       } else if (hh) {
+        if (e.ctrlKey || e.metaKey) { toggleMulti(hh.item.id); return; }
         selAnchorRef.current = { x: hh.x, y: hh.y };
         setSelectedId(hh.item.id);
         if (hh.item.cat) setActiveCat(hh.item.cat);
         setPreview(null);
-      } else setSelectedId(null);
+      } else { setSelectedId(null); clearMulti(); }
     }
   };
   const onPointerLeave = () => {
@@ -1402,6 +1498,53 @@ export default function TimelineApp() {
     setToast("Deleted");
   };
 
+  /* ------------------------------------------------------------ group edits
+     Each of these is one undo step for the whole batch, which is the point of
+     doing them as a group in the first place. */
+  const plural = (n) => n + " item" + (n === 1 ? "" : "s");
+  const bulkMove = (catId) => {
+    if (!multiCounts.total || !catId) return;
+    setDoc((d) => {
+      const eras = moveErasToCategory(d.eras, multi, catId);
+      const events = d.events.map((e) => (multi.has(e.id) ? { ...e, cat: catId } : e));
+      const nd = { ...d, eras, events };
+      /* Eras land below whatever the destination already had, so its stack may
+         have grown — the category has to be told how tall it is now. */
+      return { ...nd, categories: nd.categories.map((c) => (c.id === catId
+        ? { ...c, layers: layersOf(nd, catId) } : c)) };
+    });
+    setActiveCat(catId);
+    const name = (doc.categories.find((c) => c.id === catId) || {}).name || "";
+    setToast("Moved " + plural(multiCounts.total) + " to " + name);
+  };
+  const bulkImportance = (v) => {
+    if (!multiCounts.events) return;
+    setDoc((d) => ({
+      ...d,
+      events: d.events.map((e) => {
+        if (!multi.has(e.id)) return e;
+        const next = { ...e, imp: v };
+        if (v === IMP.NORMAL) delete next.imp;   // Normal is the unwritten default
+        return next;
+      }),
+    }));
+    const lvl = IMP_LEVELS.find((l) => l.v === v);
+    setToast(plural(multiCounts.events) + " set to " + (lvl ? lvl.label : ""));
+  };
+  const bulkDelete = () => {
+    const n = multiCounts.total;
+    setDoc((d) => ({
+      ...d,
+      events: d.events.filter((e) => !multi.has(e.id)),
+      eras: d.eras.filter((r) => !multi.has(r.id)),
+    }));
+    if (selectedId && multi.has(selectedId)) setSelectedId(null);
+    if (draft && draft.id && multi.has(draft.id)) setDraft(null);
+    setMulti(new Set());
+    setConfirmBulk(false);
+    setToast("Deleted " + plural(n) + " — Ctrl+Z puts them back");
+  };
+
   /* ---------------------------------------------------------------- categories */
   const addCategory = () => {
     const id = uid("cat");
@@ -1544,7 +1687,7 @@ export default function TimelineApp() {
       else if (k === "b") { setPanelOpen((p) => !p); e.preventDefault(); }
       else if (e.key === "Escape") {
         setShowHelp(false); setDraft(null); setSelectedId(null);
-        setSearchOpen(false); setMenu(null);
+        setSearchOpen(false); setMenu(null); clearMulti();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1674,6 +1817,8 @@ export default function TimelineApp() {
     setHist(reset(d));          // undo must not reach across timelines
     setHidden(new Set());
     setSelectedId(null);
+    setMulti(new Set());
+    setConfirmBulk(false);
     setDraft(null);
     setMenu(null);
     setLibraryOpen(false);
@@ -1849,6 +1994,10 @@ export default function TimelineApp() {
           <ItemsPanel
             doc={doc} index={index} collapsed={collapsed} expanded={expanded}
             selectedId={selectedId} editingCat={editingCat}
+            multi={multi} onToggleMulti={toggleMulti} onSelectMany={(ids) =>
+              setMulti((s) => (ids.every((id) => s.has(id))
+                ? new Set([...s].filter((id) => !ids.includes(id)))
+                : new Set([...s, ...ids])))}
             setEditingCat={(id) => { setEditingCat(id); if (id) setActiveCat(id); }}
             persistent={persistent} hidden={hidden}
             activeCat={activeCat} onActivateCat={setActiveCat}
@@ -1886,7 +2035,47 @@ export default function TimelineApp() {
           {/* These stay up while the editor is open: looking something else up
               is exactly what you need mid-edit. The drawer sits above them, so
               they only have to dodge the space it takes. */}
-          {selectedItem && (
+          {marquee && (
+            <div className="marquee" style={{
+              left: Math.min(marquee.x0, marquee.x1), top: Math.min(marquee.y0, marquee.y1),
+              width: Math.abs(marquee.x1 - marquee.x0), height: Math.abs(marquee.y1 - marquee.y0),
+            }} />
+          )}
+
+          {/* One card about one item, or one bar about several — never both. */}
+          {multiCounts.total > 0 && (
+            <div className="multibar" role="group" aria-label="Group selection">
+              <b>{multiCounts.total} selected</b>
+              <em>
+                {multiCounts.events > 0 && multiCounts.events + " event" + (multiCounts.events === 1 ? "" : "s")}
+                {multiCounts.events > 0 && multiCounts.eras > 0 && " · "}
+                {multiCounts.eras > 0 && multiCounts.eras + " era" + (multiCounts.eras === 1 ? "" : "s")}
+              </em>
+              <select value="" aria-label="Move to category"
+                onChange={(e) => bulkMove(e.target.value)}>
+                <option value="">Move to…</option>
+                {doc.categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              {multiCounts.events > 0 && (
+                <select value="" aria-label="Set importance"
+                  onChange={(e) => bulkImportance(parseInt(e.target.value, 10))}>
+                  <option value="">Importance…</option>
+                  {IMP_LEVELS.map((l) => <option key={l.key} value={l.v}>{l.label}</option>)}
+                </select>
+              )}
+              {confirmBulk ? (
+                <>
+                  <button className="btn small danger" onClick={bulkDelete}>Delete all</button>
+                  <button className="btn small" onClick={() => setConfirmBulk(false)}>Keep</button>
+                </>
+              ) : (
+                <button className="btn small" onClick={() => setConfirmBulk(true)}>Delete</button>
+              )}
+              <button className="card-x" onClick={clearMulti} aria-label="Clear selection">×</button>
+            </div>
+          )}
+
+          {selectedItem && multiCounts.total === 0 && (
             <DetailCard item={selectedItem} doc={doc} stage={sizeRef.current}
               anchor={selAnchorRef.current} rightInset={draft ? DRAWER_W : 0}
               onClose={() => setSelectedId(null)}
@@ -1896,7 +2085,7 @@ export default function TimelineApp() {
               }} />
           )}
 
-          {previewItem && !selectedItem && (
+          {previewItem && !selectedItem && multiCounts.total === 0 && (
             <DetailCard item={previewItem} doc={doc} stage={sizeRef.current}
               anchor={hoverAnchorRef.current} rightInset={draft ? DRAWER_W : 0} preview />
           )}
@@ -1925,6 +2114,7 @@ export default function TimelineApp() {
               <p><kbd>↑</kbd> <kbd>↓</kbd> scroll bands</p>
               <p><kbd>Ctrl</kbd>+<kbd>F</kbd> search · <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo</p>
               <p><kbd>Tab</kbd> next item · <kbd>L</kbd> theme · <kbd>Esc</kbd> close</p>
+              <p><kbd>Shift</kbd>+drag sweep a group · <kbd>Ctrl</kbd>+click add one</p>
               <p style={{ marginTop: 8, opacity: .8 }}>Rest on a pinned picture to peek at its card.</p>
               <p style={{ opacity: .8 }}>Right-click an item (or hold on touch) for more.</p>
               <p style={{ opacity: .8 }}>Drag the axis itself to resize the picture rail.</p>
@@ -1936,7 +2126,7 @@ export default function TimelineApp() {
               onPick={pickResult} onClose={() => setSearchOpen(false)} />
           )}
 
-          {toast && <div className="toast">{toast}</div>}
+          {toast && <div className={"toast" + (multiCounts.total ? " raised" : "")}>{toast}</div>}
 
           {libraryOpen && (
             <Library entries={entries} currentId={doc.id} busy={busy} persistent={persistent}

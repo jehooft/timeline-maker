@@ -28,8 +28,8 @@ A horizontal timeline you pan and zoom freely. On it:
 
 Everything is stored in the browser. Timelines can be created, renamed,
 duplicated, deleted, and exported/imported as JSON (lossless) or CSV
-(interchange). There is undo/redo, search, a light and dark theme, keyboard
-navigation, and touch support.
+(interchange). There is undo/redo, search, group selection and bulk editing, a
+light and dark theme, keyboard navigation, and touch support.
 
 ---
 
@@ -225,6 +225,25 @@ Documents written before layers are converted on load by `erasWithLayers()`:
 depth in the old tree is exactly the layer number, so it is lossless. The CSV
 importer still reads a legacy `parent` column the same way.
 
+Two more functions read structure off the dates rather than storing it:
+
+```js
+erasAround(eras, cat, t0, t1?)        // the eras a moment or span falls inside
+moveErasToCategory(eras, ids, cat)    // relocate a batch without breaking a layer
+```
+
+`erasAround` is what lets the editor offer an event the colours of the eras it
+sits in, next to its category's. Eras are treated as **half-open** — they run
+up to their end without including it — so a point on the boundary between two
+abutting eras belongs to the later one, matching how the bars are drawn.
+
+`moveErasToCategory` exists because a layer number means nothing outside the
+category it came from. Arrivals land *below* whatever the destination already
+holds, keeping their own relative stacking, and anything that would still
+overlap a neighbour drops one layer further. That last step is not paranoia:
+two eras from *different* categories may well cover the same years, which is
+the one thing that can never happen within one.
+
 ---
 
 ## 6. Rendering
@@ -309,6 +328,19 @@ run down.
 > **Why:** starting every era at the top of the band meant a narrow era three
 > layers down repainted the broad eras above it, so a parent took on the colour
 > of its own children.
+
+### A span's label never outlives its bar
+
+A bar long enough to hold its own name is labelled above it; one too short puts
+the label beside the end cap, level with the bar. The wide case clamps the
+label to the left edge of the screen so it stays readable while a long span
+runs off it — but the clamp is bounded by `x2p - lw - 6`, the bar's own end.
+
+> **Why:** clamping only to a minimum meant the name stayed pinned at the left
+> edge long after the span itself had been panned away — a 50-year event's
+> title still sitting there with 40 years of empty timeline under it. Now the
+> label trails the bar off screen and stops being drawn with it. Note the order:
+> `min(max(x, 10), end)`, not `max(min(x, end), 10)`.
 
 ---
 
@@ -458,11 +490,37 @@ undoable.
 
 ---
 
-## 13. Testing
+## 13. Group selection
+
+Held in `multi`, a `Set` of ids, **alongside** the single `selectedId` rather
+than replacing it. Three ways in:
+
+- **Shift-drag** on the canvas sweeps a rectangle (a DOM overlay, not canvas —
+  nothing to repaint).
+- **Ctrl/Cmd-click** an item, on the canvas or in the panel, toggles one.
+- **▣** in a category's tools takes everything in that category.
+
+A sweep takes everything it *touches*, not only what it encloses: a span can be
+wider than the screen, so demanding full enclosure would make long events
+unselectable by rectangle at any useful zoom. The first Ctrl-click seeds the set
+with whatever was already open, so the item you were looking at when you started
+grouping is not silently left out.
+
+While the set holds anything the detail card gives way to the actions bar — one
+panel about one item, or one about several, never both. Group edits (move to a
+category, set importance, delete) each go through `setDoc` **once**, so the
+whole batch is a single undo step. Which is the point of doing them as a group.
+
+Counts come off the document, not the set: an id left behind by a delete or an
+undo simply stops counting, so nothing has to prune the set.
+
+---
+
+## 14. Testing
 
 | Suite | Covers |
 |---|---|
-| `test.mjs` | calendar across ±31 Gyr, date parser, ticks at every zoom, packing, era layers, migration, ongoing fade, clock independence |
+| `test.mjs` | calendar across ±31 Gyr, date parser, ticks at every zoom, packing, era layers, containment and bulk moves, migration, ongoing fade, clock independence |
 | `test-io.mjs` | JSON and CSV round-trips field by field, malformed input, layer/importance migrations |
 | `test-phase7.mjs` | undo/redo, search ranking, clustering rules |
 | `test-storage.mjs` | save/load, picture lifecycle, corrupt data, quota failure, memory fallback |
@@ -492,7 +550,7 @@ sample pixels. Useful patterns, if you need them again:
 
 ---
 
-## 14. Things that will bite you
+## 15. Things that will bite you
 
 - **`sizeRef` is not React state.** The renderer reads size, viewport and rail
   height from refs so dragging never waits on a re-render. If you add

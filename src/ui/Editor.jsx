@@ -5,7 +5,7 @@ import { parseDateInput, fmtInstant, nowT } from "../time.js";
 import { SYMBOL_KEYS, SymbolChip } from "../symbols.jsx";
 import { IMAGE_MAX } from "../images.js";
 import {
-  PALETTE, siblingClash, IMP, IMP_LEVELS, layersOf, parentsOf,
+  PALETTE, siblingClash, IMP, IMP_LEVELS, layersOf, parentsOf, erasAround,
 } from "../model.js";
 
 /* ----------------------------------------------------------------- the editor */
@@ -37,6 +37,24 @@ export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickI
       /* Sitting below a layer that has nothing covering this span is allowed —
          it just means the era has no family to fold away with. */
       orphan = (draft.layer || 0) > 0 && parents.length === 0;
+    }
+  }
+
+  /* An event already gets its category's colour offered as the default. The
+     eras it happens to fall inside are the next thing down that it visibly
+     belongs to, so their colours are offered too — matching a marker to the
+     era behind it otherwise means going and reading the era's hex by hand.
+     Recomputed as the dates are typed, so it follows the event around. */
+  const eraSwatches = [];
+  if (startParse) {
+    const seen = new Set([String(cat ? cat.color : "").toLowerCase()]);
+    const to = endParse && order ? endParse.t : startParse.t;
+    for (const r of erasAround(doc.eras, draft.cat, startParse.t, to)) {
+      if (r.id === draft.id) continue;
+      const c = r.color || (cat ? cat.color : "");
+      if (!c || seen.has(c.toLowerCase())) continue;
+      seen.add(c.toLowerCase());
+      eraSwatches.push({ color: c, title: r.title });
     }
   }
 
@@ -238,6 +256,24 @@ export function Editor({ draft, doc, onField, onSave, onDelete, onClose, onPickI
               onClick={() => onAddColor(draft.color)}
               title="Keep this colour in the palette">+</button>
           </div>
+          {eraSwatches.length > 0 && (
+            <>
+              <div className="swatches erasw">
+                {eraSwatches.map((s) => (
+                  <button key={s.color} type="button"
+                    className={"sw" + (draft.color === s.color ? " on" : "")}
+                    onClick={() => onField("color", s.color)}
+                    title={s.title + " — " + s.color}>
+                    <span style={{ background: s.color }} />
+                  </button>
+                ))}
+              </div>
+              <em className="hint">
+                From the era{eraSwatches.length === 1 ? "" : "s"} this falls in:{" "}
+                {eraSwatches.map((s) => s.title).join(", ")}.
+              </em>
+            </>
+          )}
         </div>
 
         <div className="fld"

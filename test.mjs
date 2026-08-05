@@ -403,6 +403,72 @@ const rnd = (seed) => { let s = seed; return () => (s = (s*1103515245+12345) % 2
     ok("documents already on layers pass through untouched", M.erasWithLayers(already) === already);
   }
 
+  /* ---- what an event falls inside, which is what offers its era's colour ---- */
+  {
+    const ids = (t0, t1, cat = "vg") => M.erasAround(eras, cat, t0, t1).map(r => r.id);
+    ok("a point picks up every era covering it, broadest first",
+       ids(M.tFromCivil(1985, 6, 1)).join() === "r_con,r_8bit",
+       JSON.stringify(ids(M.tFromCivil(1985, 6, 1))));
+    /* Eras are half-open, so the instant two abutting eras share belongs to the
+       later one — the same rule the bars are drawn with, and the reason an
+       event on 1983-01-01 is offered the console era's colour, not the arcade's. */
+    ok("a point on a shared boundary belongs to the later era",
+       ids(M.tFromCivil(1983, 1, 1)).join() === "r_con,r_8bit",
+       JSON.stringify(ids(M.tFromCivil(1983, 1, 1))));
+    ok("a span picks up everything it overlaps",
+       ids(M.tFromCivil(1981, 1, 1), M.tFromCivil(1984, 1, 1)).join() === "r_arc,r_con,r_8bit",
+       JSON.stringify(ids(M.tFromCivil(1981, 1, 1), M.tFromCivil(1984, 1, 1))));
+    ok("a span merely touching an era's start is not inside it",
+       !ids(M.tFromCivil(1960, 1, 1), M.tFromCivil(1972, 1, 1)).includes("r_arc"));
+    ok("an ongoing era still covers today", ids(M.tFromCivil(2020, 1, 1)).includes("r_net"));
+    ok("only the asked-for category's eras come back",
+       M.erasAround(eras, "hist", M.tFromCivil(1985, 6, 1)).every(r => r.cat === "hist")
+       && ids(M.tFromCivil(1985, 6, 1), M.tFromCivil(1985, 6, 1), "hist").join() === "r_mod,r_inf",
+       JSON.stringify(ids(M.tFromCivil(1985, 6, 1), M.tFromCivil(1985, 6, 1), "hist")));
+    ok("a moment before everything falls in nothing",
+       ids(M.tFromCivil(1900, 1, 1)).length === 0);
+  }
+
+  /* ---- moving a group of eras to another category ---- */
+  {
+    const move = (idList, cat, from = eras) =>
+      M.moveErasToCategory(from, new Set(idList), cat);
+    /* "vg" has two layers, so anything arriving lands on layer 2 and below —
+       under what is already there, never colliding with it. */
+    const one = move(["r_jur"], "vg").find(r => r.id === "r_jur");
+    ok("a moved era joins the new category", one.cat === "vg");
+    ok("and lands below the layers already there", one.layer === 2, String(one.layer));
+
+    const two = move(["r_mes", "r_jur"], "vg");
+    ok("a batch keeps its own relative stacking",
+       two.find(r => r.id === "r_mes").layer === 2 && two.find(r => r.id === "r_jur").layer === 3,
+       JSON.stringify(two.filter(r => r.cat === "vg" && r.id.startsWith("r_m") ).map(r => r.layer)));
+    ok("eras that did not move are left exactly as they were",
+       two.find(r => r.id === "r_arc") === eras.find(r => r.id === "r_arc"));
+    ok("moving into the category an era is already in changes nothing",
+       move(["r_arc"], "vg") === eras);
+
+    /* Two eras from different categories may well cover the same years — the
+       one thing that cannot happen inside a single category. The second one
+       drops a layer rather than landing on top of the first. */
+    const a = { id: "a", cat: "x", layer: 0, title: "A",
+                start: { t: M.tFromCivil(100, 1, 1), precision: "year" },
+                end: { t: M.tFromCivil(200, 1, 1), precision: "year" } };
+    const b = { ...a, id: "b", cat: "y", title: "B" };
+    const dest = { id: "d", cat: "z", layer: 0, title: "Dest",
+                   start: { t: M.tFromCivil(0, 1, 1), precision: "year" },
+                   end: { t: M.tFromCivil(50, 1, 1), precision: "year" } };
+    const merged = M.moveErasToCategory([dest, a, b], new Set(["a", "b"]), "z");
+    ok("overlapping arrivals are stacked rather than piled up",
+       merged.find(r => r.id === "a").layer !== merged.find(r => r.id === "b").layer,
+       JSON.stringify(merged.map(r => r.id + ":" + r.layer)));
+    let bad = [];
+    for (const r of merged) { const c = M.siblingClash(merged, r); if (c) bad.push(r.id + "/" + c.id); }
+    ok("and the result has no same-layer overlap anywhere", bad.length === 0, bad.join());
+    ok("everything asked for actually moved",
+       merged.filter(r => r.cat === "z").length === 3);
+  }
+
   /* ---- REGRESSION: opening an era in the editor and saving it unchanged ----
      This is the reported bug. The editor round-trips dates through text, so if
      printing and re-parsing shifts an instant even by one second, an era that
