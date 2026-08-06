@@ -401,6 +401,9 @@ export const STYLES = `
            where both are up. */
         .toast.raised { bottom: 66px; }
 
+        .storagenote { margin: -2px 18px 12px; font-size: 11px; color: var(--muted); }
+        .storagenote b { font-weight: 600; color: var(--text); }
+
         /* ---- group selection ---- */
         .marquee { position: absolute; pointer-events: none; z-index: 14;
                    border: 1px solid var(--accent); background: rgba(224,166,75,.10); }

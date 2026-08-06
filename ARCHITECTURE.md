@@ -429,6 +429,37 @@ reads as folding away rather than blinking out.
 
 ---
 
+### Orphaned pictures used to never leave storage
+
+`doc.images` is not pruned anywhere in the UI: picking a picture and then
+swapping it for another, or deleting the item that used one, leaves the old
+record sitting in the map — nothing goes back and removes it. `saveDoc` used
+to write **every** entry in that map to its own storage key regardless of
+whether anything still pointed at it, which is what let a modest-looking
+timeline exhaust a browser's ~5 MB quota far sooner than its visible size
+would suggest: every abandoned picture from every editing session was still on
+disk, permanently.
+
+The fix has three parts, because a picture can be shared — duplicating a
+timeline copies its events and eras but re-uses the same image ids, so two
+different documents can legitimately reference one storage key:
+
+1. **`saveDoc` only ever writes a referenced picture.** Always safe: this can
+   only write *fewer* keys than the document holds, never drop one another
+   document still needs.
+2. **`encodeDoc(doc, { withImages: true })` filters the same way**, so a JSON
+   export — and the storage-size estimate, which is built from the same call —
+   never carries an abandoned picture either.
+3. **Removing an already-orphaned key** needs checking the *whole* library
+   first, since nothing about a single document can prove no other one still
+   wants it — that's what `collectGarbage` already did, previously only on
+   deleting a timeline. It now also runs, best-effort and unawaited, at boot —
+   so a browser already over quota gets space back just by being reopened —
+   and on demand from a **Clean up** button in the Timelines dialog, for
+   whoever is over quota right now and does not want to wait for a reload.
+
+---
+
 ## 10. Persistence
 
 ```
@@ -438,10 +469,38 @@ img:<id>        one picture
 app:state       preferences: theme, size, rail height, custom colours
 ```
 
-`localStorage`, wrapped in an async JSON interface so nothing above
-`storage.js` knows the backend. Falls back to memory with a visible warning
-where there is no store. Autosave is debounced 800ms. Deleting a timeline
-sweeps pictures no other timeline references.
+**IndexedDB**, with localStorage as a fallback and an in-memory map as the last
+resort — all three behind one async JSON interface, so nothing above
+`storage.js` knows which it got. Autosave is debounced 800ms. Deleting a
+timeline sweeps pictures no other timeline references.
+
+> **Why IndexedDB:** browsers cap localStorage at a flat few megabytes per
+> origin with no way to ask for more, and a picture is stored as base64 text —
+> about a third larger than the image itself — so a nominal 5 MB is really more
+> like 3.5 MB of pictures. IndexedDB is granted a share of free disk instead,
+> routinely gigabytes. Verified at 19.6 MB of pictures against a 3.2 GB quota.
+
+Three things that make the swap safe rather than merely bigger:
+
+- **A transaction per operation.** IndexedDB commits as soon as the microtask
+  queue drains with no request outstanding, so nothing may be awaited between
+  opening a transaction and issuing its request.
+- **Writes resolve on commit, not on the request succeeding.** Running out of
+  room aborts the transaction; reporting a save before that point would be the
+  same lie the save flag was fixed to stop telling.
+- **`migrateBackend` copies, verifies, then clears.** Documents written by the
+  localStorage build move across on first run. Nothing is deleted until every
+  value has been read back out of the destination and matched. If anything
+  fails — including a write that silently vanishes — it throws with the source
+  fully intact, and `ready()` simply carries on using localStorage and retries
+  next boot. This is the only part of the swap that can lose data, so it is the
+  part with direct tests rather than a stand-in for IndexedDB.
+
+The quota warning asks `navigator.storage.estimate()` and fires past 80% full.
+It used to compare against a hardcoded 2.6 MB, a fair guess at "getting close"
+when the ceiling was five — and nonsense once the ceiling moved into the
+gigabytes. The constant survives only for browsers that will not report a
+quota.
 
 **Migrations live in `decodeDoc`** and run on every load, so the rest of the
 app only ever sees current shapes:
@@ -480,9 +539,25 @@ the document they are adopting).
 
 Two related rules fall out of the same principle:
 
-- **`setBooted(true)` is unconditional** in the boot effect's `finally`. A boot
-  run that gets superseded must still let autosave start; leaving `booted`
-  false forever produces exactly the silent failure above.
+- **Boot runs are numbered, not flagged.** StrictMode mounts, unmounts and
+  remounts in development, so two boot runs race through the same awaits.
+  `bootGenRef` lets either one ask "am I still the current attempt?"; the
+  superseded run applies *nothing*, including `booted`, and the current one
+  always reaches `setBooted(true)` however it went — so autosave can never be
+  left switched off waiting on a boot that already finished.
+
+  > A per-run `cancelled` flag could answer only "was I cancelled", which is
+  > not the same question, and an unconditional `setBooted(true)` on top of it
+  > was worse: a run that returned early — before reading the stored
+  > preferences — switched the preferences effect on, and it wrote this
+  > session's defaults straight over the saved ones. Theme, display size and
+  > rail height reset themselves on load, intermittently, depending on which
+  > run won the race.
+
+- **Preferences are written only once they have been read.** Guarded on
+  `prefsLoadedRef`, not merely on `booted`: a boot that failed before reaching
+  them holds nothing worth saving, and keeping stale preferences is always the
+  safer of the two mistakes.
 - **Pending writes flush on `pagehide`/`visibilitychange`.** The debounce is
   800ms and "type something, hit F5" is a normal thing to do.
 

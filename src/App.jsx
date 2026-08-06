@@ -20,7 +20,7 @@ import { STYLES } from "./ui/styles.js";
 import { Library } from "./ui/Library.jsx";
 import {
   isPersistent, onStorageChange, probeStorage, loadIndex, loadDoc, saveDoc, deleteDoc,
-  loadAppState, saveAppState,
+  loadAppState, saveAppState, collectGarbage, storageEstimate,
   encodeDoc, decodeDoc, downloadFile, safeFileName,
 } from "./storage.js";
 import { importCSV, exportCSV, countsDroppedImages } from "./csv.js";
@@ -45,8 +45,8 @@ const ERA_FADE = 0.22;    // how long an era takes to flatten away
 const IMG_FADE = 0.22;    // a picture shrinking away, or popping back out
 const MOVE_TAU = 0.14;    // vertical glide when rows repack under a zoom or pan
 const DRAWER_W = 330;     // the editor drawer, which the detail card must dodge
-/* localStorage is usually capped around 5 MB per origin, and a timeline that
-   is quietly approaching that should say so while export is still possible. */
+/* Only used where the browser will not report a quota. Everywhere else the
+   warning comes from the real figure — see the autosave effect. */
 const SIZE_WARN = 2.6e6;
 const EXPORT_NAG = 50;    // edits since the last export before a reminder
 
@@ -64,21 +64,28 @@ const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 /* Roughly what this timeline occupies once written out. Pictures dominate, and
    a linked one costs only its URL, so they are counted as stored rather than
    guessed at. */
-/* Measured through `encodeDoc`, which is what actually gets written. Measuring
-   the live document instead threw on the first BigInt instant it met — and the
-   throw was caught and reported as zero bytes, so the storage warning could
-   never fire however large a timeline grew. */
+/* Measured through `encodeDoc(doc, { withImages: true })` — the same call
+   `saveDoc` makes — rather than the live document. Two reasons: measuring the
+   live document threw on the first BigInt instant it met, and the throw was
+   caught and reported as zero bytes, so the storage warning could never fire
+   however large a timeline grew; and `doc.images` can hold a picture nothing
+   references any more, which `saveDoc` never writes (see storage.js), so
+   counting it here would overstate what this timeline actually costs. */
 function estimateBytes(doc) {
-  let n = 0;
   try {
-    n = JSON.stringify(encodeDoc(doc)).length;
-    for (const rec of Object.values(doc.images || {})) {
+    const full = encodeDoc(doc, { withImages: true });
+    let n = JSON.stringify({ ...full, images: undefined }).length;
+    for (const rec of Object.values(full.images || {})) {
       n += rec.external ? (rec.url || "").length + 120 : JSON.stringify(rec).length;
     }
+    return n;
   } catch (err) { return 0; }
-  return n;
 }
-const fmtBytes = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + " MB" : Math.round(n / 1e3) + " KB");
+/* Reaches GB because the browser's own quota figure does: IndexedDB is granted
+   a share of free disk, so the number beside "used" is routinely in the tens
+   of gigabytes. */
+const fmtBytes = (n) => (n >= 1e9 ? (n / 1e9).toFixed(1) + " GB"
+  : n >= 1e6 ? (n / 1e6).toFixed(1) + " MB" : Math.round(n / 1e3) + " KB");
 
 /* Colours passed to fadeRect are always the hex era/category/event colours
    (PALETTE entries or a user-picked swatch), never a CSS variable, so a plain
@@ -234,6 +241,10 @@ export default function TimelineApp() {
      cannot get stuck, because it is a fact rather than a promise about the
      next render. */
   const savedDocRef = useRef(null);
+  /* Which boot attempt is the live one, and whether it got far enough to have
+     read the stored preferences. See the persistence effect. */
+  const bootGenRef = useRef(0);
+  const prefsLoadedRef = useRef(false);
 
   const index = useMemo(() => buildIndex(doc), [doc]);
   const selectedItem = useMemo(
@@ -1720,18 +1731,30 @@ export default function TimelineApp() {
   /* --------------------------------------------------------------- persistence
      Open the last timeline used, or lay down the sample one on a first visit. */
   useEffect(() => {
-    let cancelled = false;
+    /* Boot runs twice in development (StrictMode mounts, unmounts, remounts),
+       and both runs race through the same awaits. A generation counter, rather
+       than a per-run cancelled flag, is what makes "am I still the current
+       attempt?" answerable by *either* run: the superseded one then applies
+       nothing at all, including `booted`.
+
+       That last part matters more than it looks. Setting `booted` from a run
+       that returned early — before it had read the stored preferences — let
+       the preferences effect fire with this session's defaults and write them
+       straight over the saved ones. Theme, display size and rail height reset
+       themselves on load, intermittently, depending on which run won. */
+    const gen = ++bootGenRef.current;
+    const mine = () => gen === bootGenRef.current;
     /* If the store degrades at any point, say so rather than quietly dropping
        the user's work into memory. */
     const off = onStorageChange((reason) => {
-      if (cancelled) return;
+      if (!mine()) return;
       setPersistent(false);
       setToast(reason + " Working in memory — export to keep your work.");
     });
     (async () => {
       try {
         await probeStorage();
-        if (cancelled) return;
+        if (!mine()) return;
         setPersistent(isPersistent());
         const [idx, st] = await Promise.all([loadIndex(), loadAppState()]);
         let list = idx, chosen = null;
@@ -1749,7 +1772,7 @@ export default function TimelineApp() {
             list = await loadIndex();
           }
         }
-        if (cancelled) return;
+        if (!mine()) return;
         if (st.uiScale) setUiScale(st.uiScale);
         if (typeof st.showLabels === "boolean") setShowLabels(st.showLabels);
         if (st.theme === "light" || st.theme === "dark") setTheme(st.theme);
@@ -1758,22 +1781,35 @@ export default function TimelineApp() {
           setImgAreaRows(st.imgAreaRows);
         }
         if (Array.isArray(st.customColors)) setCustomColors(st.customColors);
+        /* Only now may preferences be written back. Until the stored ones have
+           actually been read, this session's defaults are not an opinion worth
+           saving — and writing them would destroy the real ones. */
+        prefsLoadedRef.current = true;
         /* What we just read *is* what is stored, so there is nothing to write
            back — and saying so here is what stops the load itself counting as
            an edit. */
         savedDocRef.current = chosen;
         setHist(reset(chosen));
         setEntries(list);
+        /* Best-effort, and never awaited: a picture nothing in the whole
+           library points at any more — left behind by an item that was
+           deleted or had its picture swapped, in some earlier session — is
+           still sitting in storage, since removing one safely means checking
+           every timeline, not just this one (see saveDoc). Sweeping it here
+           means a browser that is already over quota gets space back simply
+           by being reopened, without the user having to do anything. */
+        collectGarbage(list).catch(() => {});
       } catch (err) {
         setToast("Could not read saved timelines — starting fresh.");
       } finally {
-        /* Unconditional. A boot run that gets superseded must still let
-           autosave start: leaving `booted` false forever is silent, because
-           the save flag has nothing to report until the first write. */
-        setBooted(true);
+        /* Whichever run is still the current one always gets here, however it
+           went, so autosave can never be left switched off waiting on a boot
+           that already finished — the silent failure the save flag used to
+           hide. A superseded run sets nothing, because its successor will. */
+        if (mine()) setBooted(true);
       }
     })();
-    return () => { cancelled = true; off(); };
+    return () => { off(); };
   }, []);
 
   /* Autosave, debounced, so a burst of typing writes once. */
@@ -1800,12 +1836,28 @@ export default function TimelineApp() {
       try {
         await writeDoc(doc);
         /* Said once per session: a warning that repeats every save is noise,
-           and the answer to it (export) does not change. */
-        const bytes = estimateBytes(doc);
-        if (bytes > SIZE_WARN && !sizeWarnedRef.current) {
-          sizeWarnedRef.current = true;
-          setToast("This timeline is about " + fmtBytes(bytes)
-            + " — near what a browser will keep. Export it while you can.");
+           and the answer to it (export) does not change.
+
+           The browser's own figure decides, because a fixed byte count cannot.
+           This used to warn past a hardcoded 2.6 MB, which was a fair guess at
+           "getting close" when the backend was localStorage and the ceiling was
+           about five — and became nonsense the moment IndexedDB raised it into
+           the gigabytes. Warning that a 20 MB timeline is nearly out of room on
+           a store with 3 GB free is worse than not warning at all. The absolute
+           threshold survives only for browsers that will not report a quota,
+           where the old guess is still the best one available. */
+        if (!sizeWarnedRef.current) {
+          const est = await storageEstimate();
+          const tight = est ? est.usage / est.quota > 0.8 : estimateBytes(doc) > SIZE_WARN;
+          if (tight) {
+            sizeWarnedRef.current = true;
+            setToast(est
+              ? "Browser storage is " + Math.round((est.usage / est.quota) * 100)
+                + "% full (" + fmtBytes(est.usage) + " of " + fmtBytes(est.quota)
+                + "). Export what matters while you can."
+              : "This timeline is about " + fmtBytes(estimateBytes(doc))
+                + " — near what a browser will keep. Export it while you can.");
+          }
         }
       } catch (err) {
         setSaveState("error");
@@ -1845,8 +1897,13 @@ export default function TimelineApp() {
     }
   }, [unexported, booted]);
 
+  /* Guarded on having *read* the preferences, not merely on having booted: a
+     boot that failed before reaching them holds nothing worth writing, and
+     writing this session's defaults would overwrite the real ones. Keeping
+     stale preferences is always the safer of the two mistakes. */
   useEffect(() => {
-    if (booted) saveAppState({ lastOpenedId: doc.id, uiScale, showLabels, theme, imgAreaRows, customColors });
+    if (!booted || !prefsLoadedRef.current) return;
+    saveAppState({ lastOpenedId: doc.id, uiScale, showLabels, theme, imgAreaRows, customColors });
   }, [booted, doc.id, uiScale, showLabels, theme, imgAreaRows, customColors]);
 
   /* A backstop: whatever goes wrong underneath, the controls come back. */
@@ -1929,6 +1986,20 @@ export default function TimelineApp() {
     } catch (err) { setToast(err.message || "Could not delete it."); }
     finally { setBusy(false); }
   };
+  /* Removing a picture nothing points at any more is otherwise something that
+     only happens as a side effect of reopening the app (see the boot sweep) —
+     this is the same sweep, on demand, for a browser that is already over
+     quota and cannot wait for the next reload. */
+  const cleanupImages = async () => {
+    setBusy(true);
+    try {
+      const freed = await collectGarbage(entries);
+      setToast(freed
+        ? "Freed " + freed + " unused picture" + (freed === 1 ? "" : "s")
+        : "Nothing to clean up — no unused pictures found");
+    } catch (err) { setToast(err.message || "Could not clean up."); }
+    finally { setBusy(false); }
+  };
 
   /* -------------------------------------------------------------- files in/out */
   const markExported = () => { setUnexported(0); nagRef.current = 0; };
@@ -1984,6 +2055,20 @@ export default function TimelineApp() {
   /* Only measured while the dialog that shows it is actually open. */
   const libSizeNote = useMemo(
     () => (libraryOpen ? fmtBytes(estimateBytes(doc)) : ""), [libraryOpen, doc]);
+  /* How much room the browser says is left, which is a question this app used
+     to have no answer to at all — the size note beside it can only weigh the
+     one document it is holding. Asked only while the dialog is open, and
+     tolerated as absent, since not every browser will say. */
+  const [roomNote, setRoomNote] = useState("");
+  useEffect(() => {
+    if (!libraryOpen) return undefined;
+    let off = false;
+    storageEstimate().then((s) => {
+      if (off) return;
+      setRoomNote(s ? fmtBytes(s.usage) + " of " + fmtBytes(s.quota) + " used" : "");
+    });
+    return () => { off = true; };
+  }, [libraryOpen, doc, entries]);
   const stored = savedDocRef.current === doc;
   const v = viewRef.current;
   const span = v.spp * sizeRef.current.w;
@@ -2187,10 +2272,10 @@ export default function TimelineApp() {
 
           {libraryOpen && (
             <Library entries={entries} currentId={doc.id} busy={busy} persistent={persistent}
-              unexported={unexported} sizeNote={libSizeNote}
+              unexported={unexported} sizeNote={libSizeNote} roomNote={roomNote}
               onOpen={openTimeline} onNew={newTimeline} onDuplicate={duplicateTimeline}
               onDelete={removeTimeline} onExportJSON={exportJSON} onExportCSV={exportCSVFile}
-              onImportFile={importFile} onClose={() => setLibraryOpen(false)} />
+              onImportFile={importFile} onCleanup={cleanupImages} onClose={() => setLibraryOpen(false)} />
           )}
         </div>
       </div>

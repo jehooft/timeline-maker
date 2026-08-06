@@ -42,8 +42,11 @@ npm run preview    # serves that build locally, to check it before sharing
 
 ## What each person's copy remembers
 
-Storage is per browser, per device, so it uses the browser's own local storage,
-the same mechanism every website uses to remember you. That means:
+Storage is per browser, per device: your timelines live in the browser's own
+database (IndexedDB), the same mechanism plenty of web apps use to work
+offline. There is room for a great deal — typically gigabytes, scaling with
+your free disk space — and the Timelines dialog shows how much is in use.
+That means:
 
 - Your friend's timelines live only in *their* browser. You won't see each
   other's work unless one of you exports a file and sends it to the other.

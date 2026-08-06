@@ -2,8 +2,8 @@
    and out of the app (JSON for fidelity, CSV for spreadsheets). */
 import React, { useRef, useState } from "react";
 
-export function Library({ entries, currentId, busy, persistent, unexported, sizeNote,
-  onOpen, onNew, onDuplicate, onDelete, onExportJSON, onExportCSV, onImportFile, onClose }) {
+export function Library({ entries, currentId, busy, persistent, unexported, sizeNote, roomNote,
+  onOpen, onNew, onDuplicate, onDelete, onExportJSON, onExportCSV, onImportFile, onCleanup, onClose }) {
   const [confirmId, setConfirmId] = useState(null);
   const fileRef = useRef(null);
 
@@ -23,9 +23,21 @@ export function Library({ entries, currentId, busy, persistent, unexported, size
         )}
         {persistent && unexported > 0 && (
           <p className="notice" style={{ margin: "0 18px 12px" }}>
-            <b>{unexported}</b> change{unexported === 1 ? "" : "s"} since the last export
-            {sizeNote ? ", and this timeline is about " + sizeNote : ""}.
+            <b>{unexported}</b> change{unexported === 1 ? "" : "s"} since the last export.
             Browser storage can be cleared without warning, so an exported file is the real backup.
+          </p>
+        )}
+        {/* Size on its own says nothing useful — "3 MB" only means something
+            next to how much room there is. The second figure is the browser's
+            own, covering every timeline at once, and is absent on the browsers
+            that will not say. The two are labelled separately rather than
+            summed because they measure different things: the first is how big
+            this document is, the second is what it takes up on disk once the
+            browser has compressed it. */}
+        {persistent && sizeNote && (
+          <p className="storagenote">
+            This timeline is about <b>{sizeNote}</b>.
+            {roomNote ? <> Browser storage: <b>{roomNote}</b>.</> : null}
           </p>
         )}
 
@@ -70,6 +82,12 @@ export function Library({ entries, currentId, busy, persistent, unexported, size
               ev.target.value = "";
               if (f) onImportFile(f);
             }} />
+          {/* A picture nothing points at any more — left behind by a deleted
+              item, or one that got swapped for another — is swept up on its
+              own the next time the app is opened. This is the same sweep, for
+              anyone who is already over quota and does not want to wait. */}
+          <button className="btn" onClick={onCleanup} disabled={busy}
+            title="Remove pictures no longer used by any saved timeline">Clean up</button>
           <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
             <button className="btn" onClick={onExportCSV} disabled={busy}>Export CSV</button>
             <button className="btn primary" onClick={onExportJSON} disabled={busy}>Export JSON</button>
