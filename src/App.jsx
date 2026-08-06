@@ -64,10 +64,14 @@ const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 /* Roughly what this timeline occupies once written out. Pictures dominate, and
    a linked one costs only its URL, so they are counted as stored rather than
    guessed at. */
+/* Measured through `encodeDoc`, which is what actually gets written. Measuring
+   the live document instead threw on the first BigInt instant it met — and the
+   throw was caught and reported as zero bytes, so the storage warning could
+   never fire however large a timeline grew. */
 function estimateBytes(doc) {
   let n = 0;
   try {
-    n = JSON.stringify({ ...doc, images: undefined }).length;
+    n = JSON.stringify(encodeDoc(doc)).length;
     for (const rec of Object.values(doc.images || {})) {
       n += rec.external ? (rec.url || "").length + 120 : JSON.stringify(rec).length;
     }
@@ -216,7 +220,20 @@ export default function TimelineApp() {
      so a timeline exported and reopened elsewhere keeps its looks regardless. */
   const [customColors, setCustomColors] = useState([]);
   const saveTimer = useRef(0);
-  const skipSave = useRef(true);
+  /* The document as it currently sits in storage, by identity. Autosave asks
+     "is what I am looking at the thing that was stored?" and the save flag
+     answers from the same fact, so the flag cannot claim "Saved" over a
+     document that was never written.
+
+     This replaces a one-shot `skipSave` latch, which was armed on boot and on
+     opening a timeline and disarmed by the autosave effect. The latch had no
+     way to tell "already stored" from "not yet examined": anything that armed
+     it without then changing `doc` — so the effect never re-ran to disarm it —
+     left it stuck on, and from that point every edit was skipped silently
+     while the flag still read "Saved". A reference to the saved document
+     cannot get stuck, because it is a fact rather than a promise about the
+     next render. */
+  const savedDocRef = useRef(null);
 
   const index = useMemo(() => buildIndex(doc), [doc]);
   const selectedItem = useMemo(
@@ -1741,35 +1758,47 @@ export default function TimelineApp() {
           setImgAreaRows(st.imgAreaRows);
         }
         if (Array.isArray(st.customColors)) setCustomColors(st.customColors);
-        skipSave.current = true;
+        /* What we just read *is* what is stored, so there is nothing to write
+           back — and saying so here is what stops the load itself counting as
+           an edit. */
+        savedDocRef.current = chosen;
         setHist(reset(chosen));
         setEntries(list);
       } catch (err) {
         setToast("Could not read saved timelines — starting fresh.");
       } finally {
-        if (!cancelled) setBooted(true);
+        /* Unconditional. A boot run that gets superseded must still let
+           autosave start: leaving `booted` false forever is silent, because
+           the save flag has nothing to report until the first write. */
+        setBooted(true);
       }
     })();
     return () => { cancelled = true; off(); };
   }, []);
 
   /* Autosave, debounced, so a burst of typing writes once. */
+  const writeDoc = useCallback(async (d) => {
+    setSaveState("saving");
+    const entry = await saveDoc(d);
+    savedDocRef.current = d;
+    setEntries((prev) => {
+      const i = prev.findIndex((e) => e.id === entry.id);
+      if (i < 0) return [...prev, entry];
+      const next = [...prev]; next[i] = entry; return next;
+    });
+    setSaveState("saved");
+    return entry;
+  }, []);
+
   useEffect(() => {
     if (!booted) return undefined;
-    if (skipSave.current) { skipSave.current = false; return undefined; }
+    if (savedDocRef.current === doc) return undefined;   // already on disk
     setSaveState("dirty");
     setUnexported((n) => n + 1);
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
       try {
-        setSaveState("saving");
-        const entry = await saveDoc(doc);
-        setEntries((prev) => {
-          const i = prev.findIndex((e) => e.id === entry.id);
-          if (i < 0) return [...prev, entry];
-          const next = [...prev]; next[i] = entry; return next;
-        });
-        setSaveState("saved");
+        await writeDoc(doc);
         /* Said once per session: a warning that repeats every save is noise,
            and the answer to it (export) does not change. */
         const bytes = estimateBytes(doc);
@@ -1784,7 +1813,27 @@ export default function TimelineApp() {
       }
     }, 800);
     return () => clearTimeout(saveTimer.current);
-  }, [doc, booted]);
+  }, [doc, booted, writeDoc]);
+
+  /* Reloading or closing the tab inside the debounce window used to lose the
+     last edit outright — 800ms is short, but "type something, hit F5" is a
+     normal thing to do. Flush whatever is pending the moment the page is
+     hidden, which is the last event a browser reliably delivers. */
+  useEffect(() => {
+    if (!booted) return undefined;
+    const flush = () => {
+      if (savedDocRef.current === doc) return;
+      clearTimeout(saveTimer.current);
+      writeDoc(doc).catch(() => { /* nothing useful left to say on the way out */ });
+    };
+    const onHide = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onHide);
+    };
+  }, [doc, booted, writeDoc]);
 
   /* Browser storage can be cleared by the browser or the user without warning,
      so export is the real save. Nag on the way past every 50 edits. */
@@ -1811,8 +1860,11 @@ export default function TimelineApp() {
   }, [busy]);
 
   /* ------------------------------------------------------------- the library */
+  /* Every caller has just written `d` (or just read it back), so it is the
+     stored copy — recording that is what keeps adopting a timeline from
+     immediately re-saving it. */
   const adoptDoc = (d) => {
-    skipSave.current = true;
+    savedDocRef.current = d;
     prevRowsRef.current = new Map();
     setHist(reset(d));          // undo must not reach across timelines
     setHidden(new Set());
@@ -1932,6 +1984,7 @@ export default function TimelineApp() {
   /* Only measured while the dialog that shows it is actually open. */
   const libSizeNote = useMemo(
     () => (libraryOpen ? fmtBytes(estimateBytes(doc)) : ""), [libraryOpen, doc]);
+  const stored = savedDocRef.current === doc;
   const v = viewRef.current;
   const span = v.spp * sizeRef.current.w;
   const centrePrec = precisionForStep(pickStep(140 * v.spp));
@@ -1975,11 +2028,15 @@ export default function TimelineApp() {
           title="Switch theme (L)">{theme === "dark" ? "☾" : "☀"}</button>
         <button className="btn" onClick={() => setLibraryOpen(true)}>Timelines</button>
         <div className="readout">
-          <span className={"saveflag" + (persistent && saveState !== "error" ? "" : " warn")}>
+          {/* "Saved" is a claim about storage, so it is read off storage: the
+              flag says Saved only when the document on screen is the one that
+              was written. Deriving it from a state flag alone let it sit on
+              "Saved" over a document autosave had never looked at. */}
+          <span className={"saveflag" + (persistent && saveState !== "error" && stored ? "" : " warn")}>
             {!persistent ? "Not saved"
-              : saveState === "saving" ? "Saving…"
-                : saveState === "dirty" ? "Unsaved"
-                  : saveState === "error" ? "Save failed" : "Saved"}
+              : saveState === "error" ? "Save failed"
+                : saveState === "saving" ? "Saving…"
+                  : stored ? "Saved" : "Unsaved"}
           </span>
           <span>centre <b>{fmtInstant(v.s, centrePrec)}</b></span>
           <span>1 px = <b>{fmtDur(v.spp)}</b></span>

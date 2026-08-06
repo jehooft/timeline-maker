@@ -455,6 +455,42 @@ quota, and nags every 50 edits since the last export.
 
 ---
 
+### Autosave asks storage, not a flag
+
+`savedDocRef` holds **the document object that is currently in storage**. Both
+the autosave effect and the save indicator answer from it:
+
+```js
+savedDocRef.current === doc     // nothing to write; the flag may say "Saved"
+```
+
+Set in exactly three places: after a successful write, after boot reads a
+document, and in `adoptDoc` (whose callers have all just written or just read
+the document they are adopting).
+
+> **Why:** this replaced a one-shot `skipSave` latch, armed on boot and on
+> opening a timeline, disarmed by the next run of the autosave effect. The
+> latch could not distinguish "already stored" from "not yet examined", so
+> anything that armed it *without* then changing `doc` — the effect never
+> re-running, therefore never disarming it — left it stuck on. From that point
+> every edit was skipped **silently**, because the indicator read its own state
+> flag rather than storage and happily went on saying "Saved" over a document
+> that had never been written. A reference to the saved document cannot get
+> stuck: it is a fact, not a promise about a future render.
+
+Two related rules fall out of the same principle:
+
+- **`setBooted(true)` is unconditional** in the boot effect's `finally`. A boot
+  run that gets superseded must still let autosave start; leaving `booted`
+  false forever produces exactly the silent failure above.
+- **Pending writes flush on `pagehide`/`visibilitychange`.** The debounce is
+  800ms and "type something, hit F5" is a normal thing to do.
+
+If the indicator ever says "Unsaved" and stays there, autosave is genuinely
+failing — that is now a real signal rather than a guess.
+
+---
+
 ## 11. CSV
 
 One table holds events and eras, told apart by `type`. RFC 4180 quoting;
